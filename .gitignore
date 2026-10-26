@@ -1,0 +1,45 @@
+# Pico SDK / CMake generated files
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+.pico-sdk/
+*.uf2
+*.elf
+*.map
+*.o
+*.obj
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Local environment files; keep a shareable example
+.env
+.env.*
+!.env.example
+
+# Keep the shared VS Code configuration required by the Pico extension
+**/.vscode/*
+!**/.vscode/c_cpp_properties.json
+!**/.vscode/cmake-kits.json
+!**/.vscode/extensions.json
+!**/.vscode/launch.json
+!**/.vscode/settings.json
+!**/.vscode/tasks.json
+
+# Logs, temporary files, and OS metadata
+*.log
+*.tmp
+*~
+.DS_Store
+Thumbs.db
+Desktop.ini
