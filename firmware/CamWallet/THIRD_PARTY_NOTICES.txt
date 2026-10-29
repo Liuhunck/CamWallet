@@ -1,4 +1,4 @@
-CamWallet display bring-up: third-party notices
+CamWallet firmware: third-party notices
 
 Source package:
 https://files.waveshare.com/wiki/RP2350-Touch-LCD-2/RP2350-Touch-LCD-2.zip
@@ -9,6 +9,15 @@ SHA-256: 5261bec2c85a723738fbffb7fcae1b1a88151fe97936e89852f56880fcda1946
 drivers/lcd.c adapts the initialization sequence from C/01-LCD/lib/LCD/LCD_2in.c.
 drivers/board_pins.h uses the pin mapping from C/01-LCD/lib/Config/DEV_Config.h.
 Original author: Waveshare team. Vendor version date: 2025-03-13.
+
+drivers/camera.c adapts the sensor setup and pin mapping from
+C/02-CAM/lib/CAM/ov5640.c and cam.h. third_party/waveshare/ov5640_default_regs.h
+contains the vendor's default register table, with symbolic register names
+resolved to numeric addresses and its license retained. Delay and end markers
+are interpreted by the camera driver rather than sent to the sensor.
+drivers/camera_capture.pio implements frame-synchronized DVP capture with
+32-bit DMA. The main loop rearms capture into a second buffer before displaying
+the completed buffer; the vendor's DMA interrupt code is not used.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -56,3 +65,35 @@ SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
 CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+
+3. quirc QR decoder
+
+Upstream: https://github.com/dlbeer/quirc
+Commit: f2e4271ae43a15d9263704e07bc86cba5697d74d
+third_party/quirc contains the unmodified core C sources, headers and LICENSE.
+License: ISC. The complete license is retained in third_party/quirc/LICENSE
+and in the source file headers. Include that license when distributing binaries.
+
+4. Nayuki QR Code generator (C)
+
+Upstream: https://github.com/nayuki/QR-Code-generator
+Commit: 3c6d0b3cefb4e049dc337e82237c9644399716a8
+third_party/qrcodegen/qrcodegen.c and qrcodegen.h are copied unchanged.
+
+Copyright (c) Project Nayuki. (MIT License)
+
+Permission is hereby granted, free of charge, to any person obtaining a copy of
+this software and associated documentation files (the "Software"), to deal in
+the Software without restriction, including without limitation the rights to
+use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of
+the Software, and to permit persons to whom the Software is furnished to do so,
+subject to the following conditions:
+The above copyright notice and this permission notice shall be included in
+all copies or substantial portions of the Software.
+The Software is provided "as is", without warranty of any kind, express or
+implied, including but not limited to the warranties of merchantability,
+fitness for a particular purpose and noninfringement. In no event shall the
+authors or copyright holders be liable for any claim, damages or other
+liability, whether in an action of contract, tort or otherwise, arising from,
+out of or in connection with the Software or the use or other dealings in the
+Software.

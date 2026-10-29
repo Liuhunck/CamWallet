@@ -25,6 +25,7 @@
 #include "lcd.h"
 
 #include <stddef.h>
+#include <stdio.h>
 
 #include "hardware/spi.h"
 #include "pico/stdlib.h"
@@ -104,6 +105,15 @@ void lcd_clear(uint16_t color)
     lcd_fill_rect(0, 0, LCD_WIDTH, LCD_HEIGHT, color);
 }
 
+void lcd_display_rgb565_be(const uint8_t *pixels, size_t size)
+{
+    if (pixels == NULL || size != LCD_WIDTH * LCD_HEIGHT * 2u) {
+        return;
+    }
+    set_window(0, 0, LCD_WIDTH, LCD_HEIGHT);
+    write_data(pixels, size);
+}
+
 void lcd_init(void)
 {
     output_pin_init(CAMWALLET_LCD_BL_PIN, false);
@@ -111,8 +121,11 @@ void lcd_init(void)
     output_pin_init(CAMWALLET_LCD_DC_PIN, false);
     output_pin_init(CAMWALLET_LCD_RST_PIN, true);
 
-    /* Use a conservative SPI clock while bringing up the display. */
-    spi_init(CAMWALLET_LCD_SPI, 40000000u);
+    /* Match the vendor demo's effective SPI rate at clk_peri = 150 MHz.
+     * spi_init returns the actual divider-limited rate, not the request.
+     */
+    const uint32_t actual_spi_hz = spi_init(CAMWALLET_LCD_SPI, 75000000u);
+    printf("[LCD] SPI=%lu Hz\n", (unsigned long)actual_spi_hz);
     spi_set_format(CAMWALLET_LCD_SPI, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
     gpio_set_function(CAMWALLET_LCD_SCK_PIN, GPIO_FUNC_SPI);
     gpio_set_function(CAMWALLET_LCD_MOSI_PIN, GPIO_FUNC_SPI);

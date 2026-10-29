@@ -1,6 +1,7 @@
 #ifndef CAMWALLET_LCD_H
 #define CAMWALLET_LCD_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #define LCD_WIDTH 240u
@@ -15,6 +16,8 @@
 /* Blocking display operations; call from the main loop only. */
 void lcd_init(void);
 void lcd_clear(uint16_t color);
+/* Full-screen RGB565 pixels, high byte first, exactly width * height * 2 bytes. */
+void lcd_display_rgb565_be(const uint8_t *pixels, size_t size);
 void lcd_fill_rect(uint16_t x, uint16_t y, uint16_t width, uint16_t height,
                    uint16_t color);
 

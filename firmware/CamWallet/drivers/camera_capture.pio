@@ -1,0 +1,21 @@
+; DVP capture into one caller-owned buffer. Rearm before displaying the previous
+; buffer so capture and LCD transmission can overlap without sharing writes.
+; Pin offsets are relative to IN_BASE (GPIO0).
+; TX FIFO supplies the number of bytes minus one.
+; Shift right and autopush 32 bits: four wire bytes a,b,c,d become 0xddccbbaa.
+; Word-wide DMA on the little-endian RP2350 preserves a,b,c,d in RAM.
+.program camera_capture
+.wrap_target
+    pull block
+    mov x, osr
+    wait 1 pin 8           ; Accept an active VSYNC or wait for the next one.
+    wait 0 pin 8           ; Begin at the start of that frame.
+capture_byte:
+    wait 1 pin 9           ; HREF gates valid pixels, including line gaps.
+    wait 1 pin 10          ; Sample on PCLK rising edges.
+    in pins, 8
+    wait 0 pin 10
+    jmp x-- capture_byte
+finished:
+    jmp finished          ; Stop writing until the next explicit capture.
+.wrap
