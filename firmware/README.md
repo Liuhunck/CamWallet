@@ -4,7 +4,7 @@
 
 开发方式：C/C++、Raspberry Pi Pico SDK、VS Code 官方 Raspberry Pi Pico 扩展。
 
-**当前固件已加入 quirc 扫码和 qrcodegen 原样回传测试，尚未实现钱包功能。** 摄像头预览、方向和二维码扫描已收到实物成功反馈；二维码模块通过电脑端 15 项集成测试。扫码循环实物约 8.1 FPS、识别耗时约 29 ms。`DIAG2` 日志区分未定位二维码、解码失败和成功；成功后显示回传码 30 秒，再自动恢复扫码。新增电脑端 Python 自动验收工具见第 6 节，真实电脑摄像头读回 PASS 待验证。
+**当前固件实现纯 C 的 cUR 动态二维码传输、原生币 EVM 请求解析、CST816D 触摸审核和确认/拒绝回执，尚未实现密钥或签名。** 普通文本仍按第 6 节原样回传；动态 UR 与触摸审核操作见第 6a 节。2026-10-30 已通过 RP2350 完整交叉编译、4 组主机 C 测试和 48 项 Python 测试，覆盖 C/Python 独立互通及审核回执。新增触摸坐标和确认/拒绝光学流程待实物验证；此前普通扫码、画面方向及防闪动已获实物成功反馈，约 8.1 FPS、识别耗时约 29 ms。
 
 ## 1. 工程位置
 
@@ -26,6 +26,9 @@ C:\Users\liuhu\Desktop\github\CamWallet\firmware\CamWallet
 - `CamWallet/drivers/camera.c`、`camera.h`：OV5640 配置、异步启动/等待采集和 VSYNC 帧周期测量。
 - `CamWallet/drivers/camera_capture.pio`：由 Pico SDK 的 pioasm 生成头文件的 DVP 采集程序。
 - `CamWallet/qr/qr.c`、`qr.h`：RGB565 转灰度、quirc 识别、128 字节限制、qrcodegen 编码和二维码绘制。
+- `CamWallet/transport/`：cUR 收发会话、30 秒收集超时、分片/消息上限，以及独立 16 KiB 内存区。
+- `CamWallet/evm/`：ERC-4527 请求 CBOR 和 EIP-1559 原生币转账的只读解析与校验。
+- `CamWallet/third_party/cur/`：固定版本的 cUR 传输层源码，不含 BTC 类型编解码器。
 - `CamWallet/third_party/quirc/`、`qrcodegen/`：已随仓库提供的第三方源码，编译时无需另外下载；固定版本见 `third_party/README.md`。
 - `CamWallet/third_party/waveshare/`：官方示例提供的位图字体和摄像头初始寄存器表。
 - `CamWallet/THIRD_PARTY_NOTICES.txt`：第三方来源及许可，分发固件时一并保留。
@@ -58,7 +61,7 @@ C:\Users\liuhu\Desktop\github\CamWallet\firmware\CamWallet
 
 1. 在 VS Code 中保存修改过的文件。
 2. 点击左侧 **Raspberry Pi Pico** 图标。
-3. 本次新增了 `qr/` 和两个第三方库，首次更新后先执行 **Configure CMake**，再点击 **Compile Project**。后续按插件提示重新配置即可。
+3. 本次新增了 `transport/`、`evm/` 和 cUR，首次更新后先执行 **Configure CMake**，再点击 **Compile Project**。后续按插件提示重新配置即可。
 4. 等待终端中的编译任务成功结束。
 5. 在工程 `build/` 下找到 `CamWallet.uf2`。
 
@@ -100,7 +103,8 @@ BOOTSEL 模式用于接收 UF2；运行固件时不要求 RP2350 盘符继续存
 
 ```text
 [LCD] SPI=75000000 Hz
-[CamWallet] QR ECHO TEST DIAG2
+[CamWallet] TOUCH + EVM REVIEW V1 (NO SIGNING)
+[UR] cUR ready: part=128 message=768 fragments=32 arena=16384 timeout=30000ms
 [LCD] preview: composed status bars, one frame transfer
 [QR] scanner ready: 240x320 gray8, max_payload=128, response=30s
 [Camera] chip_id=0x5640
@@ -130,7 +134,7 @@ BOOTSEL 模式用于接收 UF2；运行固件时不要求 RP2350 盘符继续存
 - `candidates` 大于 0、`decoded=0`、`QR DECODE FAILED`：已找到候选图形，但解码失败。串口会显示如 `ECC failure` 或 `Format data ECC failure` 的具体原因，便于继续检查图像采样、清晰度和二维码完整性。
 - `no successful decode yet`：这次启动后尚未成功读取过受支持的 payload。
 - 成功会立即打印 `[QR] received`、`payload_hex`、`text`，不依赖屏幕回传编码是否成功。最近一次成功内容保留在 RAM，之后约每 5 秒用 `last success age=...` 和 `last result` 重复输出，扫码阶段和 30 秒回传阶段都有效；该记录表示历史结果。复位清除历史结果。
-- 如果仍只有 `[Camera]` 行、没有 `diag=2`，运行的是诊断更新前的版本，重新编译并烧录本次 UF2。
+- 如果没有 `[QR] scan`，运行的是诊断更新前的版本；如果只有 `QR ECHO TEST DIAG2` 启动标识，则尚未烧录 cUR 版。重新编译并烧录本次 UF2。
 
 ## 6. 二维码扫描与屏幕回传操作
 
@@ -143,7 +147,7 @@ BOOTSEL 模式用于接收 UF2；运行固件时不要求 RP2350 盘符继续存
 7. 将板子摄像头对准电脑上的测试码，调整距离和二维码显示大小，使三个定位方块与完整白边都进入画面，边缘尽量清晰。画面中只放一个二维码，避免反光、模糊和屏幕摩尔纹。
 8. 识别成功后，板子切换到白底黑色二维码，上方显示 `QR ECHO / TEST`，下方显示 `21 BYTES ECI=0`，最底部显示 `RESCAN IN 30s` 并倒计时。回传的是原始数据字节，二维码图案本身可以与输入不同。
 9. 可使用 [电脑端 Python 工具](../companion/README.md)自动读取板端屏幕并比较内容；固定测试码模式使用 `--text 'CamWallet:hello-12345'`。也可临时用能读取普通文本的扫码工具读回，结果必须完整等于 **`CamWallet:hello-12345`**，包含大小写、冒号和连字符。
-10. 移开原始测试码，等待 **30 秒**，板子自动恢复预览和 `SCAN QR`。需要提前重扫时，只按一下 **RESET / RST** 即可，不要按 BOOT。触摸操作尚未接入；如果原始码仍在镜头前，恢复后会再次识别并显示同一回传码。
+10. 移开原始测试码，等待 **30 秒**，板子自动恢复预览和 `SCAN QR`。需要提前重扫时，只按一下 **RESET / RST** 即可，不要按 BOOT。普通二维码回传页没有触摸按钮；如果原始码仍在镜头前，恢复后会再次识别并显示同一回传码。
 
 正常识别测试码时，USB 日志应包含：
 
@@ -175,12 +179,12 @@ BOOTSEL 模式用于接收 UF2；运行固件时不要求 RP2350 盘符继续存
 
 ### 支持范围和限制
 
-- 每次处理一个 **单帧 QR Code**，数据长度为 **1–128 字节**，按字节计数，UTF-8 中文通常占多个字节。
+- 普通回传每次处理一个 **单帧 QR Code**，数据长度为 **1–128 字节**，按字节计数，UTF-8 中文通常占多个字节。以 `ur:` 开头（不区分大小写）的内容进入第 6a 节的 UR 处理，不再当作普通文本回传。
 - 支持数字、字母数字和 byte 模式；支持无 ECI、ECI 3（ISO-8859-1）和 ECI 26（UTF-8）。Kanji 模式和其他 ECI 显示 `QR MODE UNSUPPORTED`。
 - 支持范围内按解码后的 payload 字节重新编码，不附加前缀或校验串，含零字节的数据也不会按 C 字符串截断。USB 文本日志会转义非 ASCII 字节，准确内容以 `payload_hex` 为准；手机对无 ECI 二进制或非 UTF-8 文本的显示取决于扫码工具。
 - 超过 128 字节显示 `QR OVER 128 BYTES`，空内容显示 `QR IS EMPTY`；继续预览，不输出截断后的回传码。将其移开再换成受支持的二维码即可。
 - 回传码使用至少 M 级纠错、整数缩放、每模块至少 3 个屏幕像素和四模块白色静区。二维码周围的文字和倒计时不会覆盖静区。
-- 暂不做 UR 动态二维码分帧重组。扫描单个 UR 片段只会回传该片段文本，不代表已收到整份请求；二维码内容的业务格式也不会在本阶段校验。
+- UR 分片必须收齐并通过整包 CRC 校验才会进入业务处理；重复分片不增加已恢复计数，不会回传单个分片。当前支持 `ur:bytes` 测试和 `ur:eth-sign-request` 的受限解析。
 
 ### 内存和采集方式
 
@@ -212,6 +216,127 @@ CMake 将主 SRAM 顶部的 **32 KiB** 单独划为主核栈，并相应缩小�
 
 方向调整由摄像头完成，无需在 CPU 上逐行翻转画面。开发者已反馈画面方向正常；新增扫码版仍需重新编译和烧录。
 
+## 6a. cUR 动态二维码与 EVM 触摸审核
+
+cUR 只负责 UR 外层、Bytewords、Fountain 分帧和重组；它不决定支持哪条链。本项目没有引入 cUR 的 PSBT、HD key 等 BTC 类型代码，EVM 请求由独立 C 模块处理。无需 Rust、Zephyr 或额外板端构建工具，相关源码随仓库提供。
+
+工程检测到 `companion/.venv` 时，SDK 构建辅助脚本也优先使用该虚拟环境中的 Python，防止 Pico 扩展把解释器重新切回全局安装；没有此环境的电脑仍可使用 Pico 扩展配置的解释器完成 C 固件构建。
+
+### 第一步：编译并烧录
+
+1. VS Code 打开 `firmware/CamWallet/`，执行 **Configure CMake → Compile Project**。
+2. 成功后按第 4 节烧录 `firmware/CamWallet/build/CamWallet.uf2`。
+3. 串口启动标识应为 `TOUCH + EVM REVIEW V1 (NO SIGNING)`，触摸日志应有 `[Touch] CST816D id=0xb6 ... READY`。USB 连接较晚可能错过启动日志，可打开串口后复位。普通测试 SVG 和 `companion/qr_echo.py` 仍可使用。
+
+本机已生成上述路径的新版 UF2，**未自动烧录**。不要使用 `firmware/build/` 中旧实验目录的 UF2。
+
+### 第二步：先测普通动态 UR
+
+在仓库根目录的 PowerShell 中运行，继续使用已有虚拟环境，无需新增 pip 依赖：
+
+```powershell
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py
+```
+
+1. 电脑每 400 ms 换一帧，默认发送 256 字节随机测试数据，CBOR 后为 259 字节、11 个基础分片。每轮内容不同。
+2. 板子对准电脑二维码。顶部显示 `UR RECEIVING`，底部如 `UR 4/11 30s LIMIT`；这里的数字是已恢复的不同分片数，不是扫到的总帧数。混合帧可能暂时不增加这个数字。
+3. 收齐后停止摄像头采集，显示 `UR ECHO / TEST` 动态回传。回传同样每 400 ms 更新，保持 60 秒。状态文字和二维码合成后一次刷屏。
+4. 立即点击电脑工具的“板子已显示回传码，开始读取”。工具先隐藏请求二维码，再打开电脑摄像头。
+5. 把板端屏幕对准电脑摄像头，等工具收齐回传并显示 **PASS**。比较的是完整的 UR 类型与 CBOR 字节，不要求分帧顺序或二维码图案相同。
+6. 下一轮等待板子恢复扫码，或只按 RESET。电脑点“新一轮”。
+
+可以用 `--camera 1` 选择相机，用 `--interval 600` 放慢电脑发码，或用 `--bytes 765` 测试整包 768 字节上限。间隔支持 200–2000 ms；大包放慢后可能超过板端 30 秒收集期限，需要恢复默认速度或减小数据长度。
+
+正常日志示例：
+
+```text
+[UR] UR RECEIVING recovered=4/11 arena=.../16384
+[UR] complete: type=bytes cbor=259 arena_peak=.../16384
+[UR] echo ready: type=bytes cbor=259 parts=11 interval=400ms hold=60s; NOT A SIGNATURE
+[UR] echo frame=1 arena_peak=.../16384
+[UR] resuming scanner; arena_used=0
+```
+
+### 第三步：触摸审核原生币转账
+
+```powershell
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py --evm
+```
+
+此模式发送带随机 UUID 的 `ur:eth-sign-request`：Chain ID `11155111`（Sepolia），nonce `0`，收款地址 `0x1111111111111111111111111111111111111111`，金额 `1000000000000000 wei`，gas limit `21000`，max fee `2000000000 wei/gas`，priority fee `1000000000 wei/gas`。这些是离线固定测试参数，工具不查询 RPC、不签名、不广播。
+
+1. 板子收齐请求并校验后，停止摄像头采集，显示 **`REVIEW 1/5`**。移开请求码，在板端核对内容。审核没有倒计时，也不会自动确认或自动回传；RESET 会中止本轮且不返回决定。
+2. 轻点后松开右下角 **NEXT** 翻页，右上角 **BACK** 返回上一页。第一页没有 BACK。每次须松手后再点，长按不会连续翻页。五页内容依次为：
+   - **1/5 网络**：网络名、完整 Chain ID、nonce、Type 2。已标注 Ethereum mainnet 和 Sepolia；其他链显示 `UNKNOWN NETWORK` 和真实链号，不猜原生币符号或精度。
+   - **2/5 地址**：带 `0x` 的完整 40 位十六进制收款地址，跨行顺序拼接，无省略号。可选发送地址标为 `UNVERIFIED`，设备没有密钥证明它属于自己。
+   - **3/5 金额**：完整最小单位整数，支持 78 位 uint256。Ethereum/Sepolia 另显示精确 18 位小数的 ETH 数量，不使用浮点数。默认示例为 `1000000000000000 wei`，即 `0.001000000000000000 ETH`。
+   - **4/5 费用**：最高总费用、gas limit、max fee/gas、priority fee/gas。默认最高费用是 `42000000000000 wei`（`21000 × 2000000000`），这是上限，不是实际扣费。
+   - **5/5 决定**：完整请求 UUID，以及 `NO SIGNATURE / NO BROADCAST`。仅此页出现 **CONFIRM**。
+3. **确认测试**：依次看完各页，在第 5 页轻点并松开右下 **CONFIRM**。板端显示 `CONFIRMED / NO SIGN` 动态回传码。再点击电脑的“板子已显示回传码，开始读取”，把板端屏幕对准电脑摄像头。预期 **PASS：板端已确认 (CONFIRMED)**，并显示请求编号、摘要一致。
+4. **拒绝测试**：等 60 秒回到扫码，或按 RESET；电脑点“新一轮”。重新扫描后，在任意审核页轻点并松开左下 **REJECT**。板端显示 `REJECTED / NO SIGN`；电脑读回后预期 **PASS：板端已拒绝 (REJECTED)**。这里 PASS 表示拒绝回执与本轮请求匹配，不表示交易被批准。
+5. 两种回传均每 400 ms 换帧，保持 60 秒，之后恢复扫码。电脑只有在点击“开始读取”后才启动自己的读取超时，因此可先从容完成审核。不要用上一轮回执验收新一轮：UUID 或请求摘要不一致会 FAIL。
+
+**首次实物验收**：先试 NEXT、BACK 和 REJECT，确认点的位置与动作相符，再做确认测试。按住 NEXT 超过 2 秒应不翻页；放开后重新轻点才有效；审核页停留超过 10 秒不应自动回传。审核内容只在翻页时合成并整屏发送，静止时不反复清屏。
+
+预期串口结果（UUID 每轮不同）：
+
+```text
+[EVM] REVIEW / NOT SIGNED request_id=... chain_id=11155111 nonce=0
+[EVM] to=0x1111111111111111111111111111111111111111 value_wei=1000000000000000 gas_limit=21000
+[EVM] max_fee_per_gas=2000000000 priority_fee_per_gas=1000000000 max_total_fee_wei=42000000000000
+[EVM] path=m/44'/60'/0'/0/0; sender address is unverified; no key loaded
+[EVM] review page=1/5; waiting for manual touch; no automatic response
+[Touch] down x=180 y=290 page=1
+[EVM] review page=2/5
+...
+[EVM] decision=CONFIRMED request_id=...; NOT SIGNED
+[UR] echo ready: type=bytes cbor=57 parts=3 interval=400ms hold=60s; NOT A SIGNATURE
+```
+
+拒绝时对应日志为 `decision=REJECTED`。串口仍输出完整交易字段，便于与板端页面核对。
+
+当前请求子集：必须提供 tag 37 的 16 字节 request UUID，`dataType=4`；派生路径为 tag 304 的 `m/44'/60'/0'/0/0`。`sign-data` 必须是 `0x02 || RLP([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list])`，正好 9 个字段，不含签名槽位。仅接受 20 字节收款地址、空 data 和空 access list。链号须为正数且与请求元数据一致；元数据省略时默认链号 1。链号、nonce、每 gas 费用限制为 uint64，gas limit 为 uint32 且至少 21000，金额支持完整 uint256。origin 若提供，仅接受最多 32 字节可打印 ASCII。拒绝重复/未知字段、非最短 CBOR/RLP、尾随数据及不支持类型。
+
+目前没有加载密钥，地址字段只做长度检查，不能证明属于设备；source fingerprint 只校验结构。**CONFIRM 仅确认本轮审核，不签名、不广播，也不会输出 `eth-signature`。** 不同 Chain ID 走同一个 EVM 解析器，尚不等同于已经支持各链钱包连接。USDC/USDT 等 ERC-20 转账含 calldata，留待下一步。
+
+### 触摸接线、故障与回执格式
+
+触摸配置来自 [Waveshare 官方资料包](https://files.waveshare.com/wiki/RP2350-Touch-LCD-2/RP2350-Touch-LCD-2.zip) 的 `C/01-LCD/lib/Touch/CST816D.*`、`Config/DEV_Config.h`。芯片 CST816D，地址 `0x15`、ID 寄存器 `0xa7=0xb6`；I2C0 SDA=GP12、SCL=GP13、INT=GP29。**触摸和 LCD 共用 GP20 复位**，因此先由 LCD 初始化执行共享复位，触摸初始化不再次拉低 GP20。驱动关闭自动睡眠，审核期间每 20 ms 轮询；每次 I2C 操作最多等 3 ms，不在中断里访问 I2C。
+
+当前 LCD 为 `MADCTL=0x48` 的 240×320 竖屏，使用原始 `(x,y)`；没有照搬官方横屏例程的 `(y,240-x)`。实际坐标仍需板上验证：右下按钮中心约 `(180,290)`，左下约 `(55,290)`，BACK 约 `(198,20)`。串口 `[Touch] down x=... y=...` 用于核对。若方向不符或点右边却触发左边，停止确认测试并记录这三个位置的坐标；不要修改已经验证正常的摄像头方向。
+
+进入审核后先要求无手指稳定 60 ms；按下至少 40 ms、至多 2 秒，且始终留在同一按钮，松手稳定 60 ms 才触发一次。跨按钮拖动、多点/越界报告、I2C 失败都会取消当前手势。触摸初始化失败或连续 10 次报告读取失败会显示 `TOUCH ERROR / NO RESPONSE SENT / RESET TO RETRY`，5 秒后回到扫描；**不会把读取错误当成松手确认，也不会伪造拒绝结果**。复位重试并检查日志。
+
+回传沿用 `ur:bytes`，CBOR 是一个 **55 字节的 byte string**，编码后共 **57 字节、3 个基础分片**。内部固定格式为 `ASCII("CWREV") || version(0x01) || decision(0x00=拒绝,0x01=确认) || request UUID(16 B) || SHA-256(32 B)`。摘要覆盖重组后的**完整原始请求 CBOR 字节**，不含 UR 文本包装；UUID 保持请求原始字节顺序。电脑严格检查长度、版本、状态、UUID 和摘要。旧固件包裹原请求的回传会 FAIL，需要同时更新板端和电脑端。摘要用于绑定本轮内容，这种回执**没有数字签名或设备身份认证**。
+
+### 限制、超时与排查
+
+- **单张二维码最多 128 ASCII 字符**，整包 CBOR 最多 768 字节，最多 32 个基础分片。电脑工具使用每片最多 24 个原始字节；普通钱包默认生成的超大 QR 需要调小分片，当前不保证直接兼容。
+- 首个有效分片开始计时，30 秒后清除未完成会话；重复码和其他消息不会延长期限。换请求前按 RESET，或移开旧码并等待超时。
+- 一个会话只接收同一类型、同一消息头的分片；普通文本、其他消息和单帧 UR 不会替换正在接收的多帧消息。终止错误或超时后重新扫描。
+- `UR FRAME REJECTED` 通常是混入其他码或内容损坏，继续扫描当前请求；`UR TOO LARGE` 是大小/片数超限；`UR MEMORY LIMIT` 是固定内存区不足，会释放接收状态后重试，可减小测试包。
+- `EVM ...` 错误表示请求完整但业务校验不通过，不生成回传。`EVM DATA UNSUPPORTED` 表示含 calldata 或 access list；`EVM CHAIN MISMATCH` 表示链号不一致。
+- 长时间停在 `0/N` 或部分计数时，检查完整白边、距离、反光与发码速度。中途错过基础帧后会继续使用 Fountain 混合帧恢复，进度不一定线性增长。
+
+### 编译与内存结果
+
+2026-10-30，本机 Pico SDK 2.3.1、GCC 15_2_Rel1、Release、`pico2`/`rp2350-arm-s` 完整编译成功。与提交 `0a7addd` 的扫码回传基线对比：
+
+| 项目 | 基线 | cUR + EVM 触摸审核版 | 增量 |
+| --- | ---: | ---: | ---: |
+| Flash 实际地址跨度 | 100528 B | 134804 B（131.6 KiB） | 34276 B |
+| 静态 RAM：向量表 + data + bss | 330124 B | 347532 B（339.4 KiB） | 17408 B |
+| 独立主核栈预留 | 32768 B | 32768 B | 0 |
+
+静态 RAM 已包含 300 KiB 双帧缓冲和 cUR 的 **16 KiB 固定内存区**；cUR 不从 quirc 的系统堆分配。quirc 初始化申请的灰度图、对象、flood-fill 工作区合计约 92372 B（90.2 KiB），未含 malloc 元数据。扣除它们后，主 SRAM 到 `__HeapLimit` 的理论堆余量约 51616 B（50.4 KiB）；这不是实测最低剩余内存或栈高水位。相对上一版解析诊断，触摸审核新增 Flash 5620 B、静态 RAM 8 B；复用停止采集后的摄像头帧绘图，没有新增全屏缓冲。
+
+Flash 使用 ELF 的 `__flash_binary_end - __flash_binary_start`，静态 RAM 使用各 RAM 段；不要把 UF2 文件大小当作 Flash 占用，也不要直接采用 `size` 默认的 `text` 列，它在此链接脚本下还计入栈/堆保留段。复核命令：
+
+```powershell
+& "$env:USERPROFILE/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-size.exe" -A firmware/CamWallet/build/CamWallet.elf
+& "$env:USERPROFILE/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm.exe" -n firmware/CamWallet/build/CamWallet.elf | Select-String '__flash_binary|__bss_|__data_|__Heap|__Stack'
+```
+
 ## 7. 常见问题
 
 - **没有 RP2350 盘符**：重新执行 BOOT / RESET 顺序，并确认 USB 线支持数据传输。
@@ -228,7 +353,7 @@ CMake 将主 SRAM 顶部的 **32 KiB** 单独划为主核栈，并相应缩小�
 - **FRAME TIMEOUT**：寄存器初始化后未能及时收到完整画面；记录 `remaining`、`VSYNC`、`HREF`、`PCLK`、`PC` 日志，反馈用于检查 DVP 时序。程序会自动重试。
 - **预览偏色、条纹、翻转或不清晰**：反馈具体画面现象和 USB 日志；这些需要实物确认像素格式、时序、传感器方向和对焦状态。
 - **有预览但不识别二维码**：先用仓库自带测试 SVG；只保留一个二维码，保证白边完整，改变距离、屏幕亮度和显示大小，等画面稳定。此版没有自动对焦固件。保留包含 `fps`、`qr` 和 `sensor` 的 USB 日志，便于区分图像不清晰与处理耗时。
-- **屏幕变成二维码后没有预览**：这是回传状态，保持 30 秒供手机读取；倒计时结束自动恢复，或只按 RESET 提前重启。
+- **屏幕变成二维码后没有预览**：这是回传状态；普通码保持 30 秒，UR 动态码保持 60 秒。倒计时结束自动恢复，或只按 RESET 提前重启。
 - **QR OVER 128 BYTES / QR MODE UNSUPPORTED / QR IS EMPTY**：输入超出当前范围，换成 1–128 字节、支持模式的单帧码；不支持的输入不会截断回传。
 - **QR MEMORY ERROR**：识别器分配失败；确认执行了 Configure CMake 并使用本次内存布局设置，再编译烧录。保留日志，不要直接增大帧缓冲或恢复默认栈配置。
 - **提示 quirc.h、qrcodegen.h 找不到，或旧版日志中没有 qr=**：确认拿到了新增 `qr/` 和 `third_party/` 文件，执行 Configure CMake，再编译并烧录本次 UF2。
@@ -242,7 +367,7 @@ VS Code 的 **Debug Project** 断点、单步调试，以及 **Flash Project (SW
 
 ## 9. 后续功能与文档维护
 
-当前已加入单帧扫码与原样回传；下一步先按第 6 节确认实物读回内容一致，再加入 UR 分帧、触摸、EVM 交易解析与确认、密钥和签名。钱包阶段计划由板端处理助记词和私钥，采用使用期间保存在 RAM 的无状态设计；这些钱包功能目前尚未实现。
+当前已加入单帧回传、cUR 分帧重组、原生币 EVM 审核和触摸确认/拒绝回执；先按第 6a 节完成两种决定的实物验收，随后接 ERC-20 转账审核，再接 C 密码库、密钥和签名。钱包阶段计划由板端处理助记词和私钥，采用使用期间保存在 RAM 的无状态设计；密钥与签名目前尚未实现。
 
 每次增加或修改可操作功能时，同步更新本文件的操作步骤、预期结果和常见问题，并区分“代码已加入”和“实物已验证”的状态。
 
@@ -258,12 +383,26 @@ ctest --test-dir firmware/tests/build --output-on-failure
 
 直接运行 `firmware/tests/build/qr_roundtrip_test.exe` 可看到 15 项详细结果：普通文本、旋转、镜像、彩色 RGB565 输入、含零字节的二进制、UTF-8/Latin-1 ECI、128 字节边界、超长/空值/不支持 ECI 拒绝，以及输入和渲染边界。测试会将输入渲染成 RGB565 后实际识别，再对固件生成的回传画面重新识别，比较长度、ECI 和全部 payload 字节，并检查帧缓冲边界保护字节。新增损坏二维码测试，确认“已定位但解码失败”会返回明确状态和错误信息，并验证下一帧不会沿用旧诊断。
 
-本次电脑端这些测试已通过，板端 C 语法检查已通过；板端完整固件编译、烧录和光学回传由开发者按前文步骤验证。
+本次电脑端测试和板端完整交叉编译均已通过；烧录和光学回传由开发者按前文步骤验证。
 
 `ctest` 还包含 `scan_preview` 状态条合成回归测试，检查摄像头画面改变时状态条像素保持一致、中间预览不被改写、长文字裁剪、旧文字清除及缓冲区边界保护。该测试已通过，开发者也已反馈实物闪动修复成功。
 
+新增 `ur_transport` 测试覆盖 768 字节消息、32 片倒序/重复、会话超时、单帧抢占拒绝、内存耗尽后恢复，以及 32 张动态二维码渲染后由 quirc 重新识别。构建后继续运行：
+
+```powershell
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py --self-test
+```
+
+Python 回归包括原有二维码测试、Foundation Python UR 与 cUR 双向互通、混合帧/丢帧恢复、CRC、消息上限、EVM 严格解析，以及确认/拒绝回执、旧 UUID/摘要/版本/状态拒绝、完整 78 位金额和 64 位链号、真实窗口轮询路径。`firmware/tests/build/ur_bridge.exe` 未构建时会跳过 C 互通测试；要复现全部结果，应先运行上面的 CMake/CTest 命令。软件测试不打开真实摄像头。
+
+新增 `evm_review` C 测试覆盖触摸报告坐标边界、按住/拖动/短触/多点/读取错误、每页拒绝、最后一页确认、没有决定不产生回执，以及全部页面渲染边界。主机可执行 `firmware/tests/build/evm_review_test.exe firmware/tests/build/review` 导出五张 PPM 页面用于检查；已核对极限位数的页面无裁剪。上述验证不能替代实物触摸坐标和光学收发测试。
+
 ## 参考资料
 
+- [cUR 源码及传输层 API](https://github.com/odudex/cUR/tree/33d8a6742c37d0d9bd19bdb65269f238d9a024d3)
+- [Foundation Python UR 参考实现](https://github.com/Foundation-Devices/foundation-ur-py/tree/a371f6355fb3433cc989ad5bf28f87a347b222fe)
+- [ERC-4527 二维码请求格式](https://eips.ethereum.org/EIPS/eip-4527)
+- [EIP-1559 Type 2 交易格式](https://eips.ethereum.org/EIPS/eip-1559)
 - [Raspberry Pi Pico 官方 VS Code 扩展](https://marketplace.visualstudio.com/items?itemName=raspberry-pi.raspberry-pi-pico)
 - [Pico C/C++ SDK 入门](https://www.raspberrypi.com/documentation/microcontrollers/c_sdk.html)
 - [Debug Probe 与 SWD 调试](https://www.raspberrypi.com/documentation/microcontrollers/debug-probe.html)

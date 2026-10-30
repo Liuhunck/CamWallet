@@ -169,6 +169,15 @@ bool qr_encode_payload(const qr_payload_t *payload, qr_symbol_t *symbol)
                                             work, symbol->modules);
 }
 
+bool qr_encode_ur(const char *text, qr_symbol_t *symbol)
+{
+    if (!text || !symbol || strlen(text) > QR_PAYLOAD_MAX_BYTES
+        || strncmp(text, "UR:", 3) != 0 || !qrcodegen_isAlphanumeric(text)) return false;
+    uint8_t work[sizeof(symbol->modules)];
+    return qrcodegen_encodeText(text, work, symbol->modules, qrcodegen_Ecc_MEDIUM,
+        1, QR_SYMBOL_MAX_VERSION, qrcodegen_Mask_AUTO, true);
+}
+
 bool qr_render_rgb565_be(const qr_symbol_t *symbol, uint8_t *pixels, size_t size,
                          unsigned width, unsigned height)
 {

@@ -23,6 +23,17 @@ if (EXISTS ${picoVscode})
     include(${picoVscode})
 endif()
 # ====================================================================================
+
+# Prefer the project's existing virtual environment for SDK Python helpers too.
+# The Pico extension can otherwise overwrite this with a global interpreter.
+if(WIN32)
+    set(CAMWALLET_PYTHON "${CMAKE_CURRENT_LIST_DIR}/../../companion/.venv/Scripts/python.exe")
+else()
+    set(CAMWALLET_PYTHON "${CMAKE_CURRENT_LIST_DIR}/../../companion/.venv/bin/python")
+endif()
+if(EXISTS "${CAMWALLET_PYTHON}")
+    set(Python3_EXECUTABLE "${CAMWALLET_PYTHON}" CACHE FILEPATH "CamWallet venv Python" FORCE)
+endif()
 set(PICO_BOARD pico2 CACHE STRING "Board type")
 
 # Pull in Raspberry Pi Pico SDK (must be before project)
@@ -34,6 +45,8 @@ project(CamWallet C CXX ASM)
 pico_sdk_init()
 
 add_subdirectory(qr)
+add_subdirectory(transport)
+add_subdirectory(evm)
 
 # Add executable. Default name is the project name, version 0.1
 
@@ -41,7 +54,11 @@ add_executable(CamWallet
         CamWallet.c
         drivers/lcd.c
         drivers/camera.c
+        drivers/touch.c
+        drivers/touch_report.c
         ui/scan_preview.c
+        ui/evm_review.c
+        ui/evm_review_render.c
         third_party/waveshare/font16.c
 )
 
@@ -65,6 +82,8 @@ pico_enable_stdio_usb(CamWallet 1)
 # Add the standard library to the build
 target_link_libraries(CamWallet
         camwallet_qr
+        camwallet_transport
+        camwallet_evm
         pico_stdlib
         hardware_spi
         hardware_i2c

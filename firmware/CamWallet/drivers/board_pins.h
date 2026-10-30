@@ -10,6 +10,12 @@
 #define CAMWALLET_LCD_RST_PIN 20
 #define CAMWALLET_LCD_BL_PIN 15
 
+/* CST816D: reset is SHARED with the LCD, not an independent touch reset. */
+#define CAMWALLET_TOUCH_I2C i2c0
+#define CAMWALLET_TOUCH_SDA_PIN 12
+#define CAMWALLET_TOUCH_SCL_PIN 13
+#define CAMWALLET_TOUCH_INT_PIN 29
+
 /* OV5640 DVP bus: D0..D7, VSYNC, HREF, PCLK are consecutive GPIOs. */
 #define CAMWALLET_CAM_DATA_PIN 0
 #define CAMWALLET_CAM_VSYNC_PIN 8

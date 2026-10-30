@@ -1,6 +1,6 @@
 # 电脑端 Python 二维码联调工具
 
-`qr_echo.py` 打开一个桌面窗口：先显示请求二维码供板子扫描，再用电脑摄像头读取板端回传，按原始字节自动比较并显示 **PASS / FAIL**。这是光学传输联调工具，尚未实现 EVM 交易准备、解析、签名或广播。
+`qr_echo.py` 测试普通二维码，`ur_echo.py` 测试动态 UR，后者加 `--evm` 可发送固定参数的 EIP-1559 原生币触摸审核测试请求。两者都先显示请求码，再隐藏请求码并用电脑摄像头读取板端回传，完整数据比较后显示 **PASS / FAIL**。这是传输与审核联调工具，没有密钥、签名、RPC 或广播。
 
 所有依赖安装在 **`companion/.venv`**，不会安装到全局 Python。依赖已锁定在 `requirements.txt`，版本范围记录在 `requirements.in`。本机的 Python 3.12 虚拟环境和依赖已经准备好。
 
@@ -75,6 +75,7 @@ Windows 默认后端无法打开摄像头或黑屏时，可尝试 DirectShow 或
 - **FAIL 显示上一次的内容**：板子还处于上轮 30 秒保持状态。等待其恢复扫码或按 RESET，再点击“新一轮”。
 - **新一轮暂时不可点击**：上一轮摄像头线程正在结束并释放设备，稍等片刻。读取期间可以先点“取消读取”。
 - **没有桌面窗口 / Tcl 错误**：从正常桌面终端运行虚拟环境的 Python；基础 Python 需要带 Tk 支持。Codex 执行沙箱可能阻止 Tcl 读取初始化文件，本机已在沙箱外检查 Tcl 8.6.12 可用。
+- **点击动态 UR“开始读取”后反复报 `TypeError: object of type 'NoneType' has no len()`**：这是首个分片到达前查询进度的电脑端缺陷，现已修复。关闭旧工具窗口，使用同一 `.venv` 命令重新启动，无需重烧板端固件。未读到有效分片时应显示“等待首个有效UR分片”，随后显示 `1/N` 等实际进度。
 - **终端中文乱码**：使用上述 `-X utf8` 启动命令；数据核对还可以看终端输出的十六进制值。
 - **键盘操作**：第 1 步按空格开始读取；读取时按 Esc 取消，其他阶段按 Esc 退出。
 
@@ -86,10 +87,41 @@ Windows 默认后端无法打开摄像头或黑屏时，可尝试 DirectShow 或
 .\companion\.venv\Scripts\python.exe -X utf8 .\companion\qr_echo.py --self-test
 ```
 
-已通过 18 项测试，包括真实二维码图像的编码/解码与二进制、中文、128 字节边界、旋转、错误/多码/历史响应、超时、读取前隐藏请求码，以及摄像头成功、失败和取消时的资源释放。摄像头测试使用模拟设备，本机真实摄像头及板端光学 PASS 仍需按第 2 节验收。
+原有 18 项测试包括真实二维码图像编码/解码、二进制、中文、128 字节边界、旋转、错误/多码/历史响应、超时、读取前隐藏请求码，以及摄像头资源释放。加上 UR/EVM 跨语言互通、确认/拒绝回执和窗口轮询回归，共 48 项通过；摄像头测试使用模拟设备，新增审核回执的光学流程仍待验收。
 
 退出窗口时，PASS 返回退出码 `0`；FAIL、TIMEOUT 和摄像头读取错误返回 `1`；未完成或取消返回 `130`；缺少依赖、参数错误或窗口初始化失败返回 `2`。
 
+## 6. 动态 UR 与 EVM 触摸审核测试
+
+先按 [firmware/README.md 第 6a 节](../firmware/README.md#6a-cur-动态二维码与-evm-触摸审核) 编译并烧录 cUR 版固件，然后运行：
+
+```powershell
+# 默认256字节随机数据，11个基础分片，400ms一帧
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py
+
+# EVM测试：Sepolia固定转账参数，UUID每轮随机；不签名
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py --evm
+```
+
+普通模式收齐后显示 `UR ECHO / TEST`。EVM 模式收齐后进入 `REVIEW 1/5`，在板端用 NEXT/BACK 审核网络、完整地址、金额和费用；最后一页点 CONFIRM，或任意页点 REJECT，松手后才显示回传二维码。审核期间不会自动确认或回传。看到 `CONFIRMED / NO SIGN` 或 `REJECTED / NO SIGN` 后，再点击电脑“开始读取”，把板端屏幕对准电脑摄像头。回传保持 60 秒；收齐且 UUID、请求摘要一致才显示 PASS，并明确标出 CONFIRMED 或 REJECTED。拒绝结果的 PASS 表示本轮回执核验成功。旧固件的原样 EVM 回传会 FAIL，需要重新烧录并重启电脑工具。
+
+可选参数：`--camera 1`、`--backend dshow`、`--interval 600`（电脑发码间隔）、`--timeout 60`（电脑读回期限）、`--bytes 765`（普通 UR 数据上限）。板端从首个有效片起只有 30 秒收集时间，大包发码太慢会超时；换请求前等待板端重置或按 RESET。
+
+电脑端使用固定版本的 Foundation Python UR 参考实现，板端使用 cUR，源码与许可均已随项目提供，**没有新增 pip 依赖**。仅需要本文件原有的 `.venv` 和 `requirements.txt`。
+
+完整软件验证顺序：
+
+```powershell
+cmake -S firmware/tests -B firmware/tests/build -G Ninja -DCMAKE_BUILD_TYPE=Debug
+cmake --build firmware/tests/build
+ctest --test-dir firmware/tests/build --output-on-failure
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py --self-test
+```
+
+C 测试需要主机 GCC/Clang，不使用 Arm GCC。Python 的独立互通测试调用生成的 `ur_bridge.exe`；该文件缺失时此类测试会标记 SKIP，其余测试照常运行。已验证双向分帧一致、乱序/重复/混合帧/丢帧恢复、资源限制、CRC 拒绝和受限 EVM 解析；新增 Tk 窗口已通过隐藏窗口初始化检查，没有自动打开真实摄像头。
+
+EVM 模式默认发送 chain ID 11155111、nonce 0、地址 `0x1111111111111111111111111111111111111111`、金额 `10^15 wei`、gas 21000、max fee 2 gwei、priority fee 1 gwei。回传为 `ur:bytes` 包装的 57 字节审核回执，包含版本、确认/拒绝、请求 UUID 和完整请求 CBOR 的 SHA-256，**不是 `eth-signature`**。摘要用于绑定请求，没有设备身份认证，不表示签名或广播成功。协议和两种结果的完整验收步骤见 firmware 第 6a 节。
+
 ## 后续钱包功能
 
-电脑端后续负责公开地址导入、RPC 查询、EIP-1559 未签名交易准备、签名恢复验证与用户主动广播。助记词和私钥由板端处理。先完成本工具的光学闭环验收，再接入 UR 分帧和钱包请求格式。
+电脑端后续负责公开地址导入、RPC 查询、真实 EIP-1559 未签名交易准备、签名恢复验证与用户主动广播。助记词和私钥由板端处理。先完成触摸审核和确认/拒绝的实物验收，再增加 ERC-20 转账审核和签名。

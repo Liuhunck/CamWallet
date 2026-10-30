@@ -59,6 +59,8 @@ qr_scan_status_t qr_scan_rgb565_be(const uint8_t *pixels, size_t size,
  */
 qr_scan_info_t qr_last_scan_info(void);
 bool qr_encode_payload(const qr_payload_t *payload, qr_symbol_t *symbol);
+/* Uppercase UR text uses QR alphanumeric mode; same physical size limits. */
+bool qr_encode_ur(const char *text, qr_symbol_t *symbol);
 
 /* Renders a white frame with a centered black QR, four-module quiet zone,
  * and at least three physical pixels per module. Header/footer stay white.

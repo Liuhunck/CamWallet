@@ -1,12 +1,21 @@
 #include <stdio.h>
+#include <inttypes.h>
+#include <string.h>
 #include "pico/stdlib.h"
 
 #include "drivers/camera.h"
 #include "drivers/lcd.h"
+#include "drivers/touch.h"
 #include "qr.h"
 #include "ui/scan_preview.h"
+#include "ur_transport.h"
+#include "cur_memory.h"
+#include "evm_request.h"
+#include "ui/evm_review.h"
 
 #define QR_ECHO_HOLD_SECONDS 30u
+#define UR_ECHO_HOLD_SECONDS 60u
+#define UR_FRAME_MS 400u
 
 _Static_assert(CAMERA_WIDTH == LCD_WIDTH && CAMERA_HEIGHT == LCD_HEIGHT,
                "Preview dimensions must match the LCD");
@@ -21,6 +30,9 @@ static qr_payload_t last_payload;
 static bool have_last_payload;
 static uint64_t last_received_at;
 static uint64_t next_result_report;
+static cw_ur_message_t ur_message;
+static evm_request_t evm_request;
+static bool touch_ready;
 
 static void show_camera_error(const char *reason)
 {
@@ -131,11 +143,124 @@ static void show_echo(uint8_t *frame, const qr_payload_t *payload)
     printf("[QR] resuming scanner\n");
 }
 
+static const char *prepare_ur_response(bool *evm)
+{
+    *evm = false;
+    if (strcmp(ur_message.type, "bytes") == 0) {
+        const uint8_t *bytes;
+        size_t size;
+        return cw_cbor_unwrap_bytes(ur_message.cbor, ur_message.length, &bytes, &size)
+            ? NULL : "UR BYTES INVALID";
+    }
+    if (strcmp(ur_message.type, "eth-sign-request") != 0) return "UR TYPE UNSUPPORTED";
+    const char *error = evm_parse_request(ur_message.cbor, ur_message.length, &evm_request);
+    if (error) return error;
+    /* Preserve the exact request until the user's decision binds its digest. */
+    *evm = true;
+    return NULL;
+}
+
+static evm_decision_t show_evm_review(uint8_t *frame)
+{
+    char uuid[33], address[41], value[79], fee[79];
+    evm_hex(evm_request.request_id, 16, uuid);
+    evm_hex(evm_request.to, 20, address);
+    evm_uint256_decimal(evm_request.value, value);
+    evm_uint256_decimal(evm_request.max_total_fee, fee);
+    printf("[EVM] REVIEW / NOT SIGNED request_id=%s chain_id=%" PRIu64 " nonce=%" PRIu64 "\n",
+           uuid, evm_request.chain_id, evm_request.nonce);
+    printf("[EVM] to=0x%s value_wei=%s gas_limit=%" PRIu32 "\n", address, value, evm_request.gas_limit);
+    printf("[EVM] max_fee_per_gas=%" PRIu64 " priority_fee_per_gas=%" PRIu64 " max_total_fee_wei=%s\n",
+           evm_request.max_fee_per_gas, evm_request.priority_fee_per_gas, fee);
+    printf("[EVM] path=m/44'/60'/0'/0/0; sender address is unverified; no key loaded\n");
+    if (!touch_ready) goto touch_error;
+    evm_review_t review;
+    evm_review_init(&review);
+    unsigned errors = 0;
+    uint8_t fingers = 0, last_fingers = 0;
+    uint16_t x = 0, y = 0;
+    if (!evm_review_render(frame, CAMERA_FRAME_BYTES, &evm_request, &review)) return EVM_PENDING;
+    lcd_display_rgb565_be(frame, CAMERA_FRAME_BYTES);
+    printf("[EVM] review page=1/5; waiting for manual touch; no automatic response\n");
+    while (review.decision == EVM_PENDING) {
+        bool valid = touch_read(&fingers, &x, &y);
+        if (valid) {
+            errors = 0;
+            if (fingers && !last_fingers) printf("[Touch] down x=%u y=%u page=%u\n", x, y, review.page + 1);
+            last_fingers = fingers;
+        } else if (++errors >= 10) goto touch_error;
+        if (evm_review_touch(&review, valid, fingers, x, y, time_us_64() / 1000u)) {
+            if (review.decision == EVM_PENDING) {
+                evm_review_render(frame, CAMERA_FRAME_BYTES, &evm_request, &review);
+                lcd_display_rgb565_be(frame, CAMERA_FRAME_BYTES);
+                printf("[EVM] review page=%u/5\n", review.page + 1);
+            }
+        }
+        sleep_ms(20);
+    }
+    printf("[EVM] decision=%s request_id=%s; NOT SIGNED\n",
+           review.decision == EVM_CONFIRMED ? "CONFIRMED" : "REJECTED", uuid);
+    return review.decision;
+touch_error:
+    printf("[Touch] unavailable/read error; review ABORTED; no receipt; RESET to retry\n");
+    lcd_clear(LCD_BLACK);
+    lcd_draw_text(10, 70, "TOUCH ERROR", 1, LCD_RED, LCD_BLACK);
+    lcd_draw_text(10, 110, "NO RESPONSE SENT", 1, LCD_WHITE, LCD_BLACK);
+    lcd_draw_text(10, 150, "RESET TO RETRY", 1, LCD_WHITE, LCD_BLACK);
+    sleep_ms(5000);
+    return EVM_PENDING;
+}
+
+static void show_ur_echo(uint8_t *frame, bool evm)
+{
+    evm_decision_t decision = EVM_PENDING;
+    if (evm) {
+        decision = show_evm_review(frame);
+        if (decision == EVM_PENDING) return;
+        size_t size = evm_decision_response(ur_message.cbor, ur_message.length, decision,
+                                           ur_message.cbor, sizeof(ur_message.cbor));
+        if (!size) { printf("[EVM] receipt encoding failed\n"); return; }
+        ur_message.length = size;
+        strcpy(ur_message.type, "bytes");
+    }
+    if (!cw_ur_tx_begin(ur_message.type, ur_message.cbor, ur_message.length)) {
+        printf("[UR] response allocation failed\n");
+        return;
+    }
+    printf("[UR] echo ready: type=%s cbor=%u parts=%u interval=%ums hold=%us; NOT A SIGNATURE\n",
+           ur_message.type, (unsigned)ur_message.length, cw_ur_tx_count(), UR_FRAME_MS, UR_ECHO_HOLD_SECONDS);
+    const uint64_t end = time_us_64() + UR_ECHO_HOLD_SECONDS * 1000000ull;
+    unsigned number = 0;
+    while (time_us_64() < end) {
+        const uint64_t start = time_us_64();
+        char part[CW_UR_PART_MAX + 1u], label[22];
+        if (!cw_ur_tx_next(part) || !qr_encode_ur(part, &response_symbol)
+            || !qr_render_rgb565_be(&response_symbol, frame, CAMERA_FRAME_BYTES, LCD_WIDTH, LCD_HEIGHT)) {
+            printf("[UR] response encode/render failed\n");
+            break;
+        }
+        ++number;
+        snprintf(label, sizeof(label), "FRAME %u %us", number,
+                 (unsigned)((end - start + 999999u) / 1000000u));
+        scan_preview_compose(frame, CAMERA_FRAME_BYTES, evm ?
+            (decision == EVM_CONFIRMED ? "CONFIRMED / NO SIGN" : "REJECTED / NO SIGN") : "UR ECHO / TEST", label);
+        lcd_display_rgb565_be(frame, CAMERA_FRAME_BYTES);
+        if (number % 12u == 1u) printf("[UR] echo frame=%u arena_peak=%u/%u\n", number,
+            (unsigned)cw_ur_memory_peak(), CW_UR_ARENA_BYTES);
+        while (time_us_64() - start < UR_FRAME_MS * 1000u) sleep_ms(10);
+    }
+    cw_ur_tx_end();
+    printf("[UR] resuming scanner; arena_used=%u\n", (unsigned)cw_ur_memory_used());
+}
+
 int main(void)
 {
     stdio_init_all();
     lcd_init();
-    printf("[CamWallet] QR ECHO TEST DIAG2\n");
+    printf("[CamWallet] TOUCH + EVM REVIEW V1 (NO SIGNING)\n");
+    touch_ready = touch_init();
+    printf("[UR] cUR ready: part=%u message=%u fragments=%u arena=%u timeout=%ums\n",
+           CW_UR_PART_MAX, CW_UR_MESSAGE_MAX, CW_UR_SEQUENCE_MAX, CW_UR_ARENA_BYTES, CW_UR_TIMEOUT_MS);
     printf("[LCD] preview: composed status bars, one frame transfer\n");
     lcd_draw_text(21, 32, "CamWallet", 2, LCD_WHITE, LCD_BLACK);
     lcd_draw_text(21, 96, "STARTING CAMERA", 1, LCD_WHITE, LCD_BLACK);
@@ -217,7 +342,41 @@ int main(void)
             camera_frames[display_index], CAMERA_FRAME_BYTES, &received_payload);
         const qr_scan_info_t scan_info = qr_last_scan_info();
         const uint32_t decode_us = (uint32_t)(time_us_64() - decode_start);
-        if (scan_status == QR_SCAN_OK) {
+        if (cw_ur_expire(time_us_64() / 1000u)) {
+            printf("[UR] receive timeout; session reset, scan the new request again\n");
+            hint = "UR TIMEOUT / RESCAN";
+            hint_until = time_us_64() + 2000000u;
+        }
+        const bool is_ur = scan_status == QR_SCAN_OK
+            && cw_ur_is_part(received_payload.bytes, received_payload.length);
+        if (is_ur) {
+            cw_ur_status_t status = cw_ur_receive(received_payload.bytes, received_payload.length,
+                time_us_64() / 1000u, &ur_message);
+            hint = cw_ur_status_text(status);
+            hint_until = time_us_64() + 2000000u;
+            bool evm = false;
+            const char *error = NULL;
+            if (status == CW_UR_COMPLETE) {
+                printf("[UR] complete: type=%s cbor=%u arena_peak=%u/%u\n", ur_message.type,
+                    (unsigned)ur_message.length, (unsigned)cw_ur_memory_peak(), CW_UR_ARENA_BYTES);
+                error = prepare_ur_response(&evm);
+                if (!error) {
+                    if (!camera_capture_wait(2000, NULL)) printf("[Camera] drain before UR: %s\n", camera_last_error());
+                    capture_running = false;
+                    show_ur_echo(camera_frames[display_index], evm);
+                    hint = "SCAN QR"; hint_until = 0; showing_error = false;
+                    window_frames = 0; last_report = time_us_64();
+                    continue;
+                }
+                hint = error;
+            }
+            if (error || time_us_64() >= next_rejection_log) {
+                printf("[UR] %s recovered=%u/%u arena=%u/%u\n", hint, cw_ur_received(), cw_ur_expected(),
+                    (unsigned)cw_ur_memory_used(), CW_UR_ARENA_BYTES);
+                next_rejection_log = time_us_64() + 1000000u;
+            }
+        }
+        if (scan_status == QR_SCAN_OK && !is_ur && !cw_ur_active()) {
             last_payload = received_payload;
             have_last_payload = true;
             last_received_at = time_us_64();
@@ -227,7 +386,7 @@ int main(void)
              */
             log_payload(&received_payload, "received");
         }
-        if (scan_status == QR_SCAN_OK
+        if (scan_status == QR_SCAN_OK && !is_ur && !cw_ur_active()
             && qr_encode_payload(&received_payload, &response_symbol)) {
             /* Finish (or timeout/abort) the outstanding DMA before the response
              * screen reuses a camera buffer and pauses the capture loop.
@@ -247,7 +406,11 @@ int main(void)
         }
 
         const uint64_t hint_now = time_us_64();
-        if (scan_status != QR_SCAN_NONE) {
+        if (is_ur || cw_ur_active()) {
+            /* Do not echo individual UR fragments or interrupt an active UR
+             * collection with an unrelated plain-text QR. */
+            if (!is_ur && hint_now >= hint_until) hint = "UR RECEIVING";
+        } else if (scan_status != QR_SCAN_NONE) {
             hint = scan_status == QR_SCAN_OK ? "QR ENCODE ERROR" : scan_hint(scan_status);
             hint_until = hint_now + 2000000u;
             if (hint_now >= next_rejection_log) {
@@ -263,6 +426,8 @@ int main(void)
         char scan_label[22];
         snprintf(scan_label, sizeof(scan_label), "FOUND %u READ %u",
                  scan_info.candidates, scan_info.decoded);
+        if (cw_ur_active()) snprintf(scan_label, sizeof(scan_label), "UR %u/%u 30s LIMIT",
+            cw_ur_received(), cw_ur_expected());
         /* Decode the untouched camera frame first, then compose both bars in
          * RAM. One LCD write avoids showing camera -> blank bar -> text on
          * every frame, with no additional framebuffer allocation.

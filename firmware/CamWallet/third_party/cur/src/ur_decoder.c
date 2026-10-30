@@ -1,0 +1,499 @@
+//
+// ur_decoder.c
+//
+// Copyright © 2025 Krux Contributors
+// Licensed under the "BSD-2-Clause Plus Patent License"
+//
+// Implementation of Uniform Resources (UR) decoder following the specification:
+// https://github.com/BlockchainCommons/Research/blob/master/papers/bcr-2020-005-ur.md
+//
+// This is an independent implementation written using
+// foundation-ur-py as a reference for testing and validation.
+//
+
+#include "ur_decoder.h"
+#include "bytewords.h"
+#include "fountain_decoder.h"
+#include "utils.h"
+#include <stdlib.h>
+#include <string.h>
+
+// UR_MAX_SEQ_LEN / UR_MAX_MESSAGE_LEN are declared in ur_decoder.h so that
+// encoders can check against the same limits this decoder enforces.
+
+ur_decoder_t *ur_decoder_new(void) {
+  ur_decoder_t *decoder = safe_malloc(sizeof(ur_decoder_t));
+  if (!decoder)
+    return NULL;
+
+  decoder->fountain_decoder = fountain_decoder_new();
+  if (!decoder->fountain_decoder) {
+    free(decoder);
+    return NULL;
+  }
+
+  decoder->expected_type = NULL;
+  decoder->result = NULL;
+  decoder->state = UR_DECODER_PROCESSING;
+
+  return decoder;
+}
+
+void ur_decoder_free(ur_decoder_t *decoder) {
+  if (!decoder)
+    return;
+
+  if (decoder->fountain_decoder) {
+    fountain_decoder_free(decoder->fountain_decoder);
+  }
+
+  if (decoder->expected_type) {
+    free(decoder->expected_type);
+  }
+
+  if (decoder->result) {
+    ur_result_free(decoder->result);
+  }
+
+  free(decoder);
+}
+
+static UR_WARN_UNUSED_RESULT bool validate_part_type(ur_decoder_t *decoder,
+                                                     const char *type) {
+  if (!decoder || !type)
+    return false;
+
+  if (!decoder->expected_type) {
+    if (!is_ur_type(type)) {
+      decoder->state = UR_DECODER_ERROR_INVALID_TYPE;
+      return false;
+    }
+    decoder->expected_type = safe_strdup(type);
+    if (!decoder->expected_type) {
+      decoder->state = UR_DECODER_ERROR_MEMORY;
+      return false;
+    }
+    return true;
+  }
+
+  if (strcmp(decoder->expected_type, type) != 0) {
+    decoder->state = UR_DECODER_ERROR_INVALID_TYPE;
+    return false;
+  }
+
+  return true;
+}
+
+static UR_WARN_UNUSED_RESULT ur_result_t *decode_single_part(const char *type,
+                                                             const char *body) {
+  if (!type || !body)
+    return NULL;
+
+  uint8_t *cbor_data;
+  size_t cbor_len;
+  if (!bytewords_decode_raw(body, &cbor_data, &cbor_len)) {
+    return NULL;
+  }
+
+  ur_result_t *result = safe_malloc(sizeof(ur_result_t));
+  if (!result) {
+    free(cbor_data);
+    return NULL;
+  }
+
+  result->type = safe_strdup(type);
+  result->cbor_data = cbor_data;
+  result->cbor_len = cbor_len;
+
+  if (!result->type) {
+    free(cbor_data);
+    free(result);
+    return NULL;
+  }
+
+  return result;
+}
+
+// CBOR unsigned integer parser (major type 0)
+static UR_WARN_UNUSED_RESULT bool
+cbor_read_uint32(const uint8_t **ptr, size_t *remaining, uint32_t *value) {
+  if (*remaining < 1)
+    return false;
+
+  uint8_t head = (*ptr)[0];
+  if (head < 24) {
+    *value = head;
+    (*ptr)++;
+    (*remaining)--;
+  } else if (head == 24) {
+    if (*remaining < 2)
+      return false;
+    *value = (*ptr)[1];
+    *ptr += 2;
+    *remaining -= 2;
+  } else if (head == 25) {
+    if (*remaining < 3)
+      return false;
+    *value = ((*ptr)[1] << 8) | (*ptr)[2];
+    *ptr += 3;
+    *remaining -= 3;
+  } else if (head == 26) {
+    if (*remaining < 5)
+      return false;
+    *value = ((uint32_t)(*ptr)[1] << 24) | ((uint32_t)(*ptr)[2] << 16) |
+             ((uint32_t)(*ptr)[3] << 8) | (uint32_t)(*ptr)[4];
+    *ptr += 5;
+    *remaining -= 5;
+  } else {
+    return false;
+  }
+  return true;
+}
+
+// CBOR byte string parser (major type 2)
+static UR_WARN_UNUSED_RESULT bool cbor_read_bytes(const uint8_t **ptr,
+                                                  size_t *remaining,
+                                                  const uint8_t **data,
+                                                  size_t *data_len) {
+  if (*remaining < 1)
+    return false;
+
+  uint8_t head = (*ptr)[0];
+  if (head >= 0x40 && head <= 0x57) {
+    *data_len = head - 0x40;
+    (*ptr)++;
+    (*remaining)--;
+  } else if (head == 0x58) {
+    if (*remaining < 2)
+      return false;
+    *data_len = (*ptr)[1];
+    *ptr += 2;
+    *remaining -= 2;
+  } else if (head == 0x59) {
+    if (*remaining < 3)
+      return false;
+    *data_len = ((*ptr)[1] << 8) | (*ptr)[2];
+    *ptr += 3;
+    *remaining -= 3;
+  } else if (head == 0x5a) {
+    if (*remaining < 5)
+      return false;
+    *data_len = ((size_t)(*ptr)[1] << 24) | ((size_t)(*ptr)[2] << 16) |
+                ((size_t)(*ptr)[3] << 8) | (size_t)(*ptr)[4];
+    *ptr += 5;
+    *remaining -= 5;
+  } else {
+    return false;
+  }
+
+  if (*remaining < *data_len)
+    return false;
+
+  *data = *ptr;
+  return true;
+}
+
+// Materialize the reassembled fountain message into decoder->result once
+// the fountain layer is complete. All fallible allocations happen before
+// the message is stolen from the fountain decoder, so an OOM here is a
+// transient UR_DECODER_ERROR_MEMORY and a later receive_part() call can
+// retry the finalization.
+static UR_WARN_UNUSED_RESULT ur_decoder_state_t
+finalize_fountain_result(ur_decoder_t *decoder) {
+  if (!fountain_decoder_is_success(decoder->fountain_decoder)) {
+    return UR_DECODER_ERROR_INVALID_CHECKSUM;
+  }
+
+  ur_result_t *decoded_result = safe_malloc(sizeof(ur_result_t));
+  char *result_type = safe_strdup(decoder->expected_type);
+  if (!decoded_result || !result_type) {
+    free(decoded_result);
+    free(result_type);
+    return UR_DECODER_ERROR_MEMORY;
+  }
+
+  size_t result_len =
+      fountain_decoder_result_message_len(decoder->fountain_decoder);
+  // Steal the reassembled message from the fountain decoder rather
+  // than malloc+memcpy a private copy.
+  uint8_t *result_data =
+      fountain_decoder_take_result_message(decoder->fountain_decoder);
+  if (!result_data || result_len == 0) {
+    free(result_data);
+    free(result_type);
+    free(decoded_result);
+    return UR_DECODER_NO_RESULT;
+  }
+
+  decoded_result->type = result_type;
+  decoded_result->cbor_data = result_data;
+  decoded_result->cbor_len = result_len;
+  decoder->result = decoded_result;
+  return UR_DECODER_OK;
+}
+
+ur_decoder_state_t ur_decoder_receive_part(ur_decoder_t *decoder,
+                                           const char *part_str) {
+  if (!decoder) {
+    return UR_DECODER_ERROR_NULL_POINTER;
+  }
+
+  // Terminal states are permanent; check before the part_str NULL check so
+  // NULL input cannot overwrite a terminal state.
+  if (ur_decoder_state_is_terminal(decoder->state)) {
+    return decoder->state;
+  }
+
+  if (!part_str) {
+    decoder->state = UR_DECODER_ERROR_NULL_POINTER;
+    return decoder->state;
+  }
+
+  decoder->state = UR_DECODER_PROCESSING;
+
+  // Retry path: a prior OOM at the completing frame can leave the fountain
+  // layer complete while this decoder is not yet terminal. Re-attempt the
+  // result materialization instead of parsing the (unneeded) part.
+  if (fountain_decoder_is_complete(decoder->fountain_decoder)) {
+    decoder->state = finalize_fountain_result(decoder);
+    return decoder->state;
+  }
+
+  // One lowercased copy of the part, split in place: the type and path
+  // components below all point into it.
+  size_t part_len = strlen(part_str);
+  char *lowered = safe_malloc_uninit(part_len + 1);
+  if (!lowered) {
+    decoder->state = UR_DECODER_ERROR_MEMORY;
+    return decoder->state;
+  }
+  memcpy(lowered, part_str, part_len + 1);
+  str_to_lower(lowered);
+
+  char *type = NULL;
+  char *components[9];
+  size_t component_count = 0;
+  uint8_t *cbor_data = NULL;
+
+  if (!parse_ur_string_inplace(lowered, &type, components,
+                               sizeof components / sizeof components[0],
+                               &component_count)) {
+    free(lowered);
+    decoder->state = UR_DECODER_ERROR_INVALID_SCHEME;
+    return decoder->state;
+  }
+
+  if (!validate_part_type(decoder, type))
+    goto cleanup;
+
+  if (component_count == 1) {
+    decoder->result = decode_single_part(type, components[0]);
+    decoder->state =
+        decoder->result ? UR_DECODER_OK : UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  if (component_count != 2) {
+    decoder->state = UR_DECODER_ERROR_INVALID_PATH_LENGTH;
+    goto cleanup;
+  }
+
+  uint32_t seq_num;
+  size_t seq_len;
+  if (!parse_sequence_component(components[0], &seq_num, &seq_len)) {
+    decoder->state = UR_DECODER_ERROR_INVALID_SEQUENCE_COMPONENT;
+    goto cleanup;
+  }
+  if (seq_len == 0) {
+    decoder->state = UR_DECODER_ERROR_INVALID_SEQUENCE_COMPONENT;
+    goto cleanup;
+  }
+  // Over-policy sequence length. Noted rather than acted on here: the terminal
+  // decision is deferred until the frame has been shown to be well formed, at
+  // the bottom of this function.
+  const bool over_max_seq_len = seq_len > UR_MAX_SEQ_LEN;
+
+  size_t cbor_len;
+  if (!bytewords_decode_raw(components[1], &cbor_data, &cbor_len)) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  if (cbor_len < 5) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  const uint8_t *cbor_ptr = cbor_data;
+  size_t remaining = cbor_len;
+
+  // Expect CBOR array of 5 elements (0x85)
+  if (remaining < 1 || cbor_ptr[0] != 0x85) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+  cbor_ptr++;
+  remaining--;
+
+  // Parse 4 CBOR unsigned integers
+  uint32_t cbor_seq_num, cbor_seq_len, cbor_message_len, cbor_checksum;
+  uint32_t *values[] = {&cbor_seq_num, &cbor_seq_len, &cbor_message_len,
+                        &cbor_checksum};
+  for (int i = 0; i < 4; i++) {
+    if (!cbor_read_uint32(&cbor_ptr, &remaining, values[i])) {
+      decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+      goto cleanup;
+    }
+  }
+
+  // Fragment body must agree with URI path (spec requires it).
+  if (cbor_seq_num != seq_num || cbor_seq_len != seq_len ||
+      cbor_message_len == 0) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  // Parse CBOR byte string (fragment data)
+  const uint8_t *fragment_ptr;
+  size_t fragment_len;
+  if (!cbor_read_bytes(&cbor_ptr, &remaining, &fragment_ptr, &fragment_len)) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  // Reject empty fragments. An attacker-crafted UR part with a zero-
+  // length CBOR byte string (head 0x40) would otherwise reach
+  // safe_realloc(cbor_data, 0) below, which on glibc/musl frees the
+  // buffer and returns NULL.
+  if (fragment_len == 0) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  // Every fragment of a message carries the same padded length,
+  // ceil(message_len / seq_len). Without this check a frame may declare a
+  // message far larger than its fragments can supply: reassembly allocates
+  // message_len uninitialised bytes, copies in only what arrived, and then
+  // CRCs the whole buffer - reading heap that was never written. A one-byte
+  // fragment claiming message_len=262144 is enough to trigger it.
+  //
+  // Computed with division and modulo rather than (message_len + seq_len - 1)
+  // so it cannot overflow regardless of the caps above.
+  const size_t expected_fragment_len =
+      cbor_message_len / seq_len + (cbor_message_len % seq_len ? 1 : 0);
+  if (fragment_len != expected_fragment_len) {
+    decoder->state = UR_DECODER_ERROR_INVALID_FRAGMENT;
+    goto cleanup;
+  }
+
+  // Policy limits are applied last, now that this is known to be a well-formed
+  // fragment whose body agrees with its path. UR_DECODER_ERROR_UNSUPPORTED_SIZE
+  // is terminal and sticky, so deciding any earlier would condemn the whole
+  // scan on the strength of a path component alone: "ur:bytes/1-1025/notbyte"
+  // is a misread frame, not an oversized message, and must stay transient so
+  // the next frame still gets a chance.
+  if (over_max_seq_len || cbor_message_len > UR_MAX_MESSAGE_LEN) {
+    decoder->state = UR_DECODER_ERROR_UNSUPPORTED_SIZE;
+    goto cleanup;
+  }
+
+  // Reuse the bytewords-decoded cbor_data allocation for the fragment
+  // instead of mallocing a fresh buffer and copying. The fragment is a
+  // suffix of cbor_data; shift it to the front and shrink the block.
+  size_t fragment_offset = (size_t)(fragment_ptr - cbor_data);
+  if (fragment_offset > 0) {
+    memmove(cbor_data, cbor_data + fragment_offset, fragment_len);
+  }
+  uint8_t *shrunk = safe_realloc(cbor_data, fragment_len);
+  if (shrunk)
+    cbor_data = shrunk;
+
+  // The fountain decoder takes the fragment buffer; whatever it leaves in
+  // part.data is still ours to free.
+  fountain_encoder_part_t part = {.seq_num = seq_num,
+                                  .seq_len = seq_len,
+                                  .message_len = cbor_message_len,
+                                  .checksum = cbor_checksum,
+                                  .data = cbor_data,
+                                  .data_len = fragment_len};
+  cbor_data = NULL;
+
+  bool success =
+      fountain_decoder_receive_part(decoder->fountain_decoder, &part);
+  free(part.data);
+
+  if (!success) {
+    // Separate a malformed part from a transient allocation failure: both are
+    // non-terminal, but only the latter means a well-formed fragment was
+    // dropped, which is worth surfacing distinctly.
+    decoder->state =
+        fountain_decoder_had_alloc_failure(decoder->fountain_decoder)
+            ? UR_DECODER_ERROR_MEMORY
+            : UR_DECODER_ERROR_INVALID_PART;
+    goto cleanup;
+  }
+
+  if (fountain_decoder_is_complete(decoder->fountain_decoder)) {
+    decoder->state = finalize_fountain_result(decoder);
+  }
+
+cleanup:
+  free(cbor_data);
+  free(lowered);
+  return decoder->state;
+}
+
+ur_decoder_state_t ur_decoder_get_state(const ur_decoder_t *decoder) {
+  return decoder ? decoder->state : UR_DECODER_ERROR_NULL_POINTER;
+}
+
+ur_result_t *ur_decoder_get_result(ur_decoder_t *decoder) {
+  if (!decoder || decoder->state != UR_DECODER_OK) {
+    return NULL;
+  }
+  return decoder->result;
+}
+
+size_t ur_decoder_expected_part_count(ur_decoder_t *decoder) {
+  if (!decoder || !decoder->fountain_decoder)
+    return 0;
+  return fountain_decoder_expected_part_count(decoder->fountain_decoder);
+}
+
+size_t ur_decoder_processed_parts_count(ur_decoder_t *decoder) {
+  if (!decoder || !decoder->fountain_decoder)
+    return 0;
+  return fountain_decoder_processed_parts_count(decoder->fountain_decoder);
+}
+
+size_t ur_decoder_received_parts_count(ur_decoder_t *decoder) {
+  if (!decoder || !decoder->fountain_decoder)
+    return 0;
+  return fountain_decoder_received_parts_count(decoder->fountain_decoder);
+}
+
+float ur_decoder_estimated_percent_complete(ur_decoder_t *decoder) {
+  if (!decoder || !decoder->fountain_decoder)
+    return 0.0f;
+  return fountain_decoder_estimated_percent_complete(decoder->fountain_decoder);
+}
+
+float ur_decoder_estimated_percent_complete_weighted(ur_decoder_t *decoder) {
+  if (!decoder || !decoder->fountain_decoder)
+    return 0.0f;
+  return fountain_decoder_estimated_percent_complete_weighted(
+      decoder->fountain_decoder);
+}
+
+void ur_result_free(ur_result_t *result) {
+  if (!result)
+    return;
+
+  if (result->type) {
+    free(result->type);
+  }
+  if (result->cbor_data) {
+    free(result->cbor_data);
+  }
+  free(result);
+}

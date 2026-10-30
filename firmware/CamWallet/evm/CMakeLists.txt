@@ -1,0 +1,6 @@
+add_library(camwallet_evm STATIC evm_request.c evm_decision.c)
+target_link_libraries(camwallet_evm PUBLIC camwallet_cur)
+target_include_directories(camwallet_evm PUBLIC ${CMAKE_CURRENT_LIST_DIR})
+if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(camwallet_evm PRIVATE -Wall -Wextra -Werror)
+endif()

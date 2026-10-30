@@ -104,10 +104,11 @@ def decode_qrs(image) -> list[bytes]:
 class CameraWorker(threading.Thread):
     """Own the camera on this thread; Tk receives bounded, latest-frame updates."""
 
-    def __init__(self, index: int, backend: str) -> None:
+    def __init__(self, index: int, backend: str, *, continuous: bool = False) -> None:
         super().__init__(daemon=True)
         self.index = index
         self.backend = backend
+        self.continuous = continuous
         self.stop_event = threading.Event()
         self.frames: queue.Queue = queue.Queue(maxsize=1)
         self.events: queue.SimpleQueue = queue.SimpleQueue()
@@ -152,7 +153,8 @@ class CameraWorker(threading.Thread):
                     if payloads:
                         if not self.stop_event.is_set():
                             self.events.put(("codes", payloads))
-                        break
+                        if not self.continuous:
+                            break
                 self.stop_event.wait(0.01)
         except Exception as error:
             if not self.stop_event.is_set():
