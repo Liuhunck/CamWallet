@@ -26,6 +26,7 @@ htmlcov/
 .env
 .env.*
 !.env.example
+companion/local/
 
 # Keep the shared VS Code configuration required by the Pico extension
 **/.vscode/*

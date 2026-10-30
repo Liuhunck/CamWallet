@@ -7,6 +7,7 @@
 #include "cur_memory.h"
 #include "evm_request.h"
 #include "ui/evm_review.h"
+#include "wallet.h"
 
 static int nibble(char c)
 {
@@ -29,7 +30,20 @@ static size_t from_hex(const char *hex, uint8_t *out, size_t capacity)
 int main(int argc, char **argv)
 {
     int rc = 2;
-    if (argc == 5 && !strcmp(argv[1], "encode")) {
+    if ((argc == 3 || argc == 5) && !strcmp(argv[1], "wallet")) {
+        /* Public test seeds supplied only to this host test binary. */
+        uint8_t seed[64], blind[32] = {1}, addr[20];
+        size_t n = from_hex(argv[2], seed, sizeof(seed));
+        if (!wallet_create(seed, n, blind) || !wallet_address(addr)) goto done;
+        char hex[WALLET_SIGNATURE_CBOR_SIZE * 2 + 1]; evm_hex(addr, 20, hex); puts(hex);
+        if (argc == 5) {
+            uint8_t data[768]; n = from_hex(argv[3], data, sizeof(data));
+            n = wallet_sign(data, n, !strcmp(argv[4], "approve"), data, sizeof(data));
+            if (!n) goto done;
+            evm_hex(data, n, hex); puts(hex);
+        }
+        rc = 0;
+    } else if (argc == 5 && !strcmp(argv[1], "encode")) {
         uint8_t data[CW_UR_MESSAGE_MAX];
         size_t size = from_hex(argv[3], data, sizeof(data));
         unsigned count = (unsigned)strtoul(argv[4], NULL, 10);
@@ -85,6 +99,7 @@ int main(int argc, char **argv)
         rc = 0;
     }
 done:
+    wallet_clear();
     cw_ur_reset(); cw_ur_tx_end();
     fprintf(stderr, "arena_peak=%u arena_used=%u\n", (unsigned)cw_ur_memory_peak(), (unsigned)cw_ur_memory_used());
     return cw_ur_memory_used() ? 3 : rc;

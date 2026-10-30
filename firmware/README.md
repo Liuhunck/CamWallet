@@ -4,7 +4,7 @@
 
 开发方式：C/C++、Raspberry Pi Pico SDK、VS Code 官方 Raspberry Pi Pico 扩展。
 
-**当前固件实现纯 C 的 cUR 动态二维码传输、原生币 EVM 请求解析、CST816D 触摸审核和确认/拒绝回执，尚未实现密钥或签名。** 普通文本仍按第 6 节原样回传；动态 UR 与触摸审核操作见第 6a 节。2026-10-30 已通过 RP2350 完整交叉编译、4 组主机 C 测试和 48 项 Python 测试，覆盖 C/Python 独立互通及审核回执。新增触摸坐标和确认/拒绝光学流程待实物验证；此前普通扫码、画面方向及防闪动已获实物成功反馈，约 8.1 FPS、识别耗时约 29 ms。
+**当前固件已加入仅在 RAM 中创建账户、原生币 EVM 审核和 Sepolia 签名。没有账户恢复或持久化保存。** 第 6a 节保留无密钥测试（开机选 TEST ONLY）；第 6b 节是 CREATE → 准备交易 → 扫码签名 → 主动广播的操作步骤。已通过 RP2350 编译及软件回归；新增账户和签名功能仍待实物与上链验收。
 
 ## 1. 工程位置
 
@@ -103,7 +103,7 @@ BOOTSEL 模式用于接收 UF2；运行固件时不要求 RP2350 盘符继续存
 
 ```text
 [LCD] SPI=75000000 Hz
-[CamWallet] TOUCH + EVM REVIEW V1 (NO SIGNING)
+[CamWallet] SEPOLIA SIGNER V1 / RAM ACCOUNT
 [UR] cUR ready: part=128 message=768 fragments=32 arena=16384 timeout=30000ms
 [LCD] preview: composed status bars, one frame transfer
 [QR] scanner ready: 240x320 gray8, max_payload=128, response=30s
@@ -226,13 +226,13 @@ cUR 只负责 UR 外层、Bytewords、Fountain 分帧和重组；它不决定支
 
 1. VS Code 打开 `firmware/CamWallet/`，执行 **Configure CMake → Compile Project**。
 2. 成功后按第 4 节烧录 `firmware/CamWallet/build/CamWallet.uf2`。
-3. 串口启动标识应为 `TOUCH + EVM REVIEW V1 (NO SIGNING)`，触摸日志应有 `[Touch] CST816D id=0xb6 ... READY`。USB 连接较晚可能错过启动日志，可打开串口后复位。普通测试 SVG 和 `companion/qr_echo.py` 仍可使用。
+3. 开机选择左下 `TEST ONLY`（不创建账户），串口启动标识应为 `SEPOLIA SIGNER V1 / RAM ACCOUNT`，触摸日志应有 `[Touch] CST816D id=0xb6 ... READY`。USB 连接较晚可能错过启动日志，可打开串口后复位。普通测试 SVG 和 `companion/qr_echo.py` 仍可使用。
 
 本机已生成上述路径的新版 UF2，**未自动烧录**。不要使用 `firmware/build/` 中旧实验目录的 UF2。
 
 ### 第二步：先测普通动态 UR
 
-在仓库根目录的 PowerShell 中运行，继续使用已有虚拟环境，无需新增 pip 依赖：
+在仓库根目录的 PowerShell 中运行，继续使用已有虚拟环境；新增签名工具和完整测试所需依赖按第 6b 节同步：
 
 ```powershell
 .\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py
@@ -252,7 +252,7 @@ cUR 只负责 UR 外层、Bytewords、Fountain 分帧和重组；它不决定支
 ```text
 [UR] UR RECEIVING recovered=4/11 arena=.../16384
 [UR] complete: type=bytes cbor=259 arena_peak=.../16384
-[UR] echo ready: type=bytes cbor=259 parts=11 interval=400ms hold=60s; NOT A SIGNATURE
+[UR] response ready: type=bytes cbor=259 parts=11 interval=400ms hold=60s; NOT A SIGNATURE
 [UR] echo frame=1 arena_peak=.../16384
 [UR] resuming scanner; arena_used=0
 ```
@@ -281,23 +281,23 @@ cUR 只负责 UR 外层、Bytewords、Fountain 分帧和重组；它不决定支
 预期串口结果（UUID 每轮不同）：
 
 ```text
-[EVM] REVIEW / NOT SIGNED request_id=... chain_id=11155111 nonce=0
+[EVM] REVIEW ONLY request_id=... chain_id=11155111 nonce=0
 [EVM] to=0x1111111111111111111111111111111111111111 value_wei=1000000000000000 gas_limit=21000
 [EVM] max_fee_per_gas=2000000000 priority_fee_per_gas=1000000000 max_total_fee_wei=42000000000000
-[EVM] path=m/44'/60'/0'/0/0; sender address is unverified; no key loaded
+[EVM] path=m/44'/60'/0'/0/0; sender=UNVERIFIED / NO KEY
 [EVM] review page=1/5; waiting for manual touch; no automatic response
 [Touch] down x=180 y=290 page=1
 [EVM] review page=2/5
 ...
-[EVM] decision=CONFIRMED request_id=...; NOT SIGNED
-[UR] echo ready: type=bytes cbor=57 parts=3 interval=400ms hold=60s; NOT A SIGNATURE
+[EVM] decision=CONFIRMED request_id=...; signature not generated yet
+[UR] response ready: type=bytes cbor=57 parts=3 interval=400ms hold=60s; NOT A SIGNATURE
 ```
 
 拒绝时对应日志为 `decision=REJECTED`。串口仍输出完整交易字段，便于与板端页面核对。
 
 当前请求子集：必须提供 tag 37 的 16 字节 request UUID，`dataType=4`；派生路径为 tag 304 的 `m/44'/60'/0'/0/0`。`sign-data` 必须是 `0x02 || RLP([chain_id, nonce, max_priority_fee_per_gas, max_fee_per_gas, gas_limit, to, value, data, access_list])`，正好 9 个字段，不含签名槽位。仅接受 20 字节收款地址、空 data 和空 access list。链号须为正数且与请求元数据一致；元数据省略时默认链号 1。链号、nonce、每 gas 费用限制为 uint64，gas limit 为 uint32 且至少 21000，金额支持完整 uint256。origin 若提供，仅接受最多 32 字节可打印 ASCII。拒绝重复/未知字段、非最短 CBOR/RLP、尾随数据及不支持类型。
 
-目前没有加载密钥，地址字段只做长度检查，不能证明属于设备；source fingerprint 只校验结构。**CONFIRM 仅确认本轮审核，不签名、不广播，也不会输出 `eth-signature`。** 不同 Chain ID 走同一个 EVM 解析器，尚不等同于已经支持各链钱包连接。USDC/USDT 等 ERC-20 转账含 calldata，留待下一步。
+本节 TEST ONLY 模式没有加载密钥，地址字段只做长度检查，不能证明属于设备；source fingerprint 只校验结构。**CONFIRM 仅确认本轮审核，不签名、不广播，也不会输出 `eth-signature`。** 不同 Chain ID 走同一个 EVM 解析器，尚不等同于已经支持各链钱包连接。USDC/USDT 等 ERC-20 转账含 calldata，留待下一步。
 
 ### 触摸接线、故障与回执格式
 
@@ -318,7 +318,9 @@ cUR 只负责 UR 外层、Bytewords、Fountain 分帧和重组；它不决定支
 - `EVM ...` 错误表示请求完整但业务校验不通过，不生成回传。`EVM DATA UNSUPPORTED` 表示含 calldata 或 access list；`EVM CHAIN MISMATCH` 表示链号不一致。
 - 长时间停在 `0/N` 或部分计数时，检查完整白边、距离、反光与发码速度。中途错过基础帧后会继续使用 Fountain 混合帧恢复，进度不一定线性增长。
 
-### 编译与内存结果
+### 触摸审核版历史编译与内存结果
+
+以下是加入签名前的基线；当前签名版数据见第 6b 节末尾。
 
 2026-10-30，本机 Pico SDK 2.3.1、GCC 15_2_Rel1、Release、`pico2`/`rp2350-arm-s` 完整编译成功。与提交 `0a7addd` 的扫码回传基线对比：
 
@@ -337,6 +339,94 @@ Flash 使用 ELF 的 `__flash_binary_end - __flash_binary_start`，静态 RAM �
 & "$env:USERPROFILE/.pico-sdk/toolchain/15_2_Rel1/bin/arm-none-eabi-nm.exe" -n firmware/CamWallet/build/CamWallet.elf | Select-String '__flash_binary|__bss_|__data_|__Heap|__Stack'
 ```
 
+## 6b. 创建账户并在 Sepolia 签名
+
+本轮只增加 **创建账户**，没有恢复、助记词输入或持久化保存。账户密钥只在 RAM：**RESET、断电或重新烧录后无法恢复原账户**，重新点 CREATE 会得到新地址。先用少量 Sepolia 测试 ETH 联调，保持板子供电到交易完成；不用它保存资产。
+
+### 1. 更新并创建账户
+
+1. 在 `firmware/CamWallet/` 执行 **Configure CMake → Compile Project**，按第 4 节烧录 `build/CamWallet.uf2`。新版启动标识为 `SEPOLIA SIGNER V1 / RAM ACCOUNT`。本机已编译生成，未自动烧录。
+2. 开机进入 `SEPOLIA TEST WALLET`。点右下 **CREATE** 创建新账户；左下 **TEST ONLY** 进入原来的无密钥扫码/审核测试，第 6a 节仍可使用。没有恢复入口。
+3. 创建后屏幕显示 **SEPOLIA ADDRESS** 地址二维码，内容是完整的 `0x...` 地址。用手机扫码查看/复制，或在 USB 串口取 `[Wallet] SEPOLIA address=...`。串口不输出种子或私钥。
+4. 给这个地址转入少量 Sepolia 测试 ETH；可从 [Ethereum 官方网络页面](https://ethereum.org/developers/docs/networks/#sepolia) 的水龙头列表获取。这里需要测试 ETH 支付 gas。
+5. 记录地址后轻点屏幕底部左侧或右侧，进入摄像头扫码。**本次供电期间账户不变**，后续交易等待回传倒计时结束即可重扫，别用 RESET 跳过倒计时。
+
+预期日志：
+
+```text
+[CamWallet] SEPOLIA SIGNER V1 / RAM ACCOUNT
+[Touch] CST816D id=0xb6 ... READY ...
+[Wallet] SEPOLIA address=0x... path=m/44'/60'/0'/0/0; RAM ONLY, reset loses key
+```
+
+### 2. 电脑准备交易
+
+在仓库根目录 PowerShell 运行。仍用原有 `.venv`；新增 `eth-account` 用于独立验签，其依赖已锁定：
+
+```powershell
+uv pip sync companion/requirements.txt --python companion/.venv/Scripts/python.exe
+
+# 填你使用的 Sepolia HTTPS RPC 地址；仅保存在当前终端环境。
+$env:CAMWALLET_RPC_URL = 'https://你的Sepolia-RPC地址'
+$sender = '0x板端刚生成的完整地址'
+# 首次可向自己转账；也可换成另一个 Sepolia 普通账户地址。
+$recipient = $sender
+
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py prepare --sender $sender --to $recipient --amount-eth 0.000001 --out companion/local/request1.json
+```
+
+`prepare` 校验 RPC 链号必须为 **11155111**，查询 pending nonce、base fee、priority fee、估算 gas 和余额，保存未签名参数。最高每 gas 费用为 `2 × base fee + priority fee`，板端审核时显示实际请求数值。首版只向无合约代码的普通账户转账；不支持 ERC-20、合约调用或非空 access list。金额按十进制精确转成 wei，最多 18 位小数。
+
+输出文件不覆盖旧文件。再次准备请换 `request2.json` 等路径；`companion/local/` 已被 Git 忽略。RPC 只由电脑访问，板端不联网。
+
+### 3. 扫码、确认签名、电脑验签
+
+```powershell
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py sign companion/local/request1.json --out companion/local/signed1.json
+```
+
+1. 让板子扫描电脑动态二维码。电脑每轮生成新 UUID；请求带完整 sender，板端要求与自己派生的地址一致。
+2. 板端审核页显示 **SEPOLIA SIGNING**，地址页显示 **FROM (DEVICE KEY)**，最后一页显示 **SIGN THIS TRANSFER? / CONFIRM WILL SIGN**。核对网络、完整收付款地址、金额、nonce 和最高费用。
+3. 点 **CONFIRM** 并松手后，板端对刚才审核的原始 Type 2 交易进行 Keccak-256 和 secp256k1 ECDSA 签名，再自验签名。随后显示 **SIGNED / SEPOLIA**。
+4. 电脑点“板子已显示回传码，开始读取”，将板端屏幕对准电脑摄像头。需要换相机可加 `--camera 1` 或 `--backend dshow`。
+5. 电脑收齐 `ur:eth-signature` 后，检查 UUID、r/s/v 范围、low-S，独立恢复发送地址，并组装 Type 2 原始交易、再次恢复和核对所有交易字段。只有通过才写入 `signed1.json`，显示 **PASS / 尚未广播** 和交易哈希。扫码本身不发送 RPC。
+6. 在任意页点 **REJECT** 会返回绑定原请求的拒绝回执，电脑显示“已拒绝”，**不生成签名文件**。旧审核版的 CONFIRMED 回执也不能当作签名通过。
+
+板端预期日志：
+
+```text
+[EVM] REVIEW TO SIGN request_id=... chain_id=11155111 nonce=...
+[EVM] path=m/44'/60'/0'/0/0; sender=VERIFIED
+[EVM] decision=CONFIRMED request_id=...; signature not generated yet
+[UR] response ready: type=eth-signature cbor=89 parts=4 interval=400ms hold=60s; SIGNED / NOT BROADCAST
+```
+
+签名回传保持 60 秒，之后回到扫码，账户仍在 RAM。若电脑读取超时，等待板端回到扫描后重新运行 `sign`，保持供电；“新一轮”会换 UUID，但不会重新查询 nonce/费用。交易参数需要更新时重新运行 `prepare`。保存成功后先关闭签名窗口，再进入下一步。
+
+### 4. 主动广播并查询上链结果
+
+```powershell
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py broadcast companion/local/signed1.json
+
+# 将下面的参数替换成上一步打印的完整交易哈希。
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py receipt 0x完整交易哈希
+```
+
+只有 `broadcast` 命令会调用 `eth_sendRawTransaction`。广播前再次校验文件中的签名、发送地址、交易字段、交易哈希、RPC 链号与 pending nonce；nonce 变化会停止，要求重新准备和审核。广播后打印 Sepolia 浏览器链接；`receipt` 显示“执行成功”且 `status=0x1` 才表示成功上链，PASS 只代表本地验签通过。
+
+如果提交时网络超时，工具不会自动重试。它会在提交前打印已知交易哈希，先用 `receipt` 或区块浏览器查询，避免把“没收到响应”误认为“没提交”。工具不会自动领取测试币或广播。
+
+### 实现与当前验证范围
+
+- 椭圆曲线使用 [libsecp256k1 v0.8.0](https://github.com/bitcoin-core/secp256k1/tree/6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d)：固定 32 位算术路径，RFC6979 确定性签名、low-S、上下文随机化和签后自验。不开启实验性 ARM 汇编。上下文使用 1 KiB 静态区，无运行期堆分配。
+- Keccak-256、HMAC-SHA512、SHA256/RIPEMD160、清零函数取自固定版本的 Trezor crypto。CamWallet 用这些接口实现固定路径 `m/44'/60'/0'/0/0` 的 BIP32 派生；异常子节点直接失败，不悄悄换派生路径。源码版本与许可证见 `CamWallet/third_party/README.md`。
+- 板端创建种子/盲化材料采用 Pico SDK 2.3.1 `pico_rand`，该配置混入 RP2350 TRNG；派生后清零种子、中间节点和临时数据。未完成随机源质量、侧信道、掉电残留或生产级密钥保护验证，因此当前固件硬性限定 Sepolia。
+- 已创建账户时，请求必须带匹配 sender；可选 source fingerprint 若提供也必须匹配。签名数据直接引用审核时解析的原始 CBOR 内 `sign-data`；签名前重新严格解析并校验。拒绝、触摸错误或未确认不调用签名。
+- 签名响应为 `eth-signature` 的两字段 CBOR：tag 37 的 UUID 和 65 字节 `r || s || yParity`；当前 Type 2 的 yParity 为 0/1。总计 89 字节、4 个基础分片。拒绝仍用第 6a 节的 57 字节 `CWREV` 回执。完整消息上限仍为 768 字节。
+- 软件验证包含 Keccak 空串向量、账户清除/替换、BIP32 地址跨实现比较、C/Python 确定性签名逐字节比较、UR 签名收发、错误 UUID/发送者/交易/高-S/链号拒绝，以及广播前校验和超时不自动重发。**实物创建、签名耗时、光学回传、真实 RPC 广播及上链仍待按上述步骤验收。**
+
+本机 Release 编译后的 Flash 地址跨度 **238952 B（233.4 KiB）**；静态 RAM（向量表、uninitialized、data、bss）**349296 B（341.1 KiB）**，主核栈仍预留 32768 B。相对触摸审核版增加 Flash 104148 B、静态 RAM 1764 B。计入 quirc 约 92372 B 的堆申请后理论余量约 **49852 B**，未含 malloc 元数据；不等于实测最低可用 RAM。编译器报告 `wallet_sign` 自身栈 624 B，库中较大单函数栈约 2040 B；没有把单函数数字当作完整调用链栈高水位。
+
 ## 7. 常见问题
 
 - **没有 RP2350 盘符**：重新执行 BOOT / RESET 顺序，并确认 USB 线支持数据传输。
@@ -353,7 +443,7 @@ Flash 使用 ELF 的 `__flash_binary_end - __flash_binary_start`，静态 RAM �
 - **FRAME TIMEOUT**：寄存器初始化后未能及时收到完整画面；记录 `remaining`、`VSYNC`、`HREF`、`PCLK`、`PC` 日志，反馈用于检查 DVP 时序。程序会自动重试。
 - **预览偏色、条纹、翻转或不清晰**：反馈具体画面现象和 USB 日志；这些需要实物确认像素格式、时序、传感器方向和对焦状态。
 - **有预览但不识别二维码**：先用仓库自带测试 SVG；只保留一个二维码，保证白边完整，改变距离、屏幕亮度和显示大小，等画面稳定。此版没有自动对焦固件。保留包含 `fps`、`qr` 和 `sensor` 的 USB 日志，便于区分图像不清晰与处理耗时。
-- **屏幕变成二维码后没有预览**：这是回传状态；普通码保持 30 秒，UR 动态码保持 60 秒。倒计时结束自动恢复，或只按 RESET 提前重启。
+- **屏幕变成二维码后没有预览**：这是回传状态；普通码保持 30 秒，UR 动态码保持 60 秒。倒计时结束自动恢复。TEST ONLY 模式可按 RESET 提前重启；CREATE 模式不要这样做，RESET 会丢失账户。
 - **QR OVER 128 BYTES / QR MODE UNSUPPORTED / QR IS EMPTY**：输入超出当前范围，换成 1–128 字节、支持模式的单帧码；不支持的输入不会截断回传。
 - **QR MEMORY ERROR**：识别器分配失败；确认执行了 Configure CMake 并使用本次内存布局设置，再编译烧录。保留日志，不要直接增大帧缓冲或恢复默认栈配置。
 - **提示 quirc.h、qrcodegen.h 找不到，或旧版日志中没有 qr=**：确认拿到了新增 `qr/` 和 `third_party/` 文件，执行 Configure CMake，再编译并烧录本次 UF2。
@@ -367,7 +457,7 @@ VS Code 的 **Debug Project** 断点、单步调试，以及 **Flash Project (SW
 
 ## 9. 后续功能与文档维护
 
-当前已加入单帧回传、cUR 分帧重组、原生币 EVM 审核和触摸确认/拒绝回执；先按第 6a 节完成两种决定的实物验收，随后接 ERC-20 转账审核，再接 C 密码库、密钥和签名。钱包阶段计划由板端处理助记词和私钥，采用使用期间保存在 RAM 的无状态设计；密钥与签名目前尚未实现。
+当前已加入 RAM 测试账户创建与 Sepolia 原生币签名，先按第 6b 节完成实物签名和上链验收，再增加 ERC-20 转账审核。账户恢复、助记词和持久存储本轮不做。
 
 每次增加或修改可操作功能时，同步更新本文件的操作步骤、预期结果和常见问题，并区分“代码已加入”和“实物已验证”的状态。
 
@@ -393,7 +483,7 @@ ctest --test-dir firmware/tests/build --output-on-failure
 .\companion\.venv\Scripts\python.exe -X utf8 .\companion\ur_echo.py --self-test
 ```
 
-Python 回归包括原有二维码测试、Foundation Python UR 与 cUR 双向互通、混合帧/丢帧恢复、CRC、消息上限、EVM 严格解析，以及确认/拒绝回执、旧 UUID/摘要/版本/状态拒绝、完整 78 位金额和 64 位链号、真实窗口轮询路径。`firmware/tests/build/ur_bridge.exe` 未构建时会跳过 C 互通测试；要复现全部结果，应先运行上面的 CMake/CTest 命令。软件测试不打开真实摄像头。
+当前 5 组 CTest、60 项 Python 测试全部通过。Python 回归包括原有二维码测试、Foundation Python UR 与 cUR 双向互通、混合帧/丢帧恢复、CRC、消息上限、EVM 严格解析，以及确认/拒绝回执、旧 UUID/摘要/版本/状态拒绝、完整 78 位金额和 64 位链号、真实窗口轮询路径。`firmware/tests/build/ur_bridge.exe` 未构建时会跳过 C 互通测试；要复现全部结果，应先运行上面的 CMake/CTest 命令。软件测试不打开真实摄像头。
 
 新增 `evm_review` C 测试覆盖触摸报告坐标边界、按住/拖动/短触/多点/读取错误、每页拒绝、最后一页确认、没有决定不产生回执，以及全部页面渲染边界。主机可执行 `firmware/tests/build/evm_review_test.exe firmware/tests/build/review` 导出五张 PPM 页面用于检查；已核对极限位数的页面无裁剪。上述验证不能替代实物触摸坐标和光学收发测试。
 

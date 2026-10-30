@@ -47,6 +47,7 @@ pico_sdk_init()
 add_subdirectory(qr)
 add_subdirectory(transport)
 add_subdirectory(evm)
+add_subdirectory(crypto)
 
 # Add executable. Default name is the project name, version 0.1
 
@@ -84,6 +85,8 @@ target_link_libraries(CamWallet
         camwallet_qr
         camwallet_transport
         camwallet_evm
+        camwallet_wallet
+        pico_rand
         pico_stdlib
         hardware_spi
         hardware_i2c

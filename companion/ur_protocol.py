@@ -110,12 +110,12 @@ def encoder(ur_type: str, payload: bytes) -> UREncoder:
                      min_fragment_len=min(10, len(payload)))
 
 
-def checked_part(text: str) -> tuple[str, bool]:
+def checked_part(text: str, allowed_types=("bytes",)) -> tuple[str, bool]:
     """Bound every reference-decoder allocation before accepting camera text."""
     if len(text) > PART_MAX or any(ord(c) < 33 or ord(c) > 126 for c in text):
         raise ValueError("UR frame length/characters")
     ur_type, components = URDecoder.parse(text)
-    if ur_type != "bytes" or len(components) not in (1, 2):
+    if ur_type not in allowed_types or len(components) not in (1, 2):
         raise ValueError("Expected ur:bytes diagnostic response")
     decoded = Bytewords.decode(Bytewords_Style_minimal, components[-1])
     if len(components) == 2:
@@ -137,6 +137,7 @@ class URSession:
     timeout: float = 60.0
     review: bool = False
     decision: str | None = field(default=None, init=False)
+    allowed_types: tuple[str, ...] = field(default=("bytes",), init=False)
     phase: Phase = field(default=Phase.REQUEST, init=False)
     received: tuple[bytes, ...] = field(default=(), init=False)
     detail: str = field(default="", init=False)
@@ -184,7 +185,7 @@ class URSession:
             return True
         try:
             text = payloads[0].decode("ascii")
-            _, multipart = checked_part(text)
+            _, multipart = checked_part(text, self.allowed_types)
             if self.multipart is not None and self.multipart != multipart:
                 return False
             self.decoder.receive_part(text)
@@ -201,6 +202,10 @@ class URSession:
             return False
         actual = bytes(self.decoder.result_message().cbor)
         self.received = (actual,)
+        self.complete(actual, self.decoder.result_message().type)
+        return True
+
+    def complete(self, actual: bytes, ur_type: str):
         if self.review:
             # Exact canonical CBOR bstr + fixed versioned binary payload.
             # Reject old echo firmware, unknown versions/statuses and tails.
@@ -213,8 +218,7 @@ class URSession:
                 self.detail = f"PASS：板端{action} ({self.decision})；请求编号和摘要一致。未签名、未广播。"
             else:
                 self.detail = "FAIL：审核回执格式、请求编号或摘要不符；检查固件版本和是否为旧回传码。"
-            return True
+            return
         self.phase = Phase.PASSED if actual == self.expected else Phase.FAILED
         self.detail = (f"PASS：完整UR消息{len(actual)}字节一致；这是传输/解析测试，未签名。"
                        if self.phase == Phase.PASSED else "FAIL：完整消息与本轮请求不一致，可能是旧回传码。")
-        return True

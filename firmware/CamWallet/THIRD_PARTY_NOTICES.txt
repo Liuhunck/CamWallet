@@ -1,5 +1,18 @@
 CamWallet firmware: third-party notices
 
+Signing dependencies added in the Sepolia prototype:
+
+- bitcoin-core/libsecp256k1 v0.8.0, commit
+  6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d.
+  https://github.com/bitcoin-core/secp256k1
+  MIT license and original copyrights: third_party/secp256k1/COPYING.
+- Selected trezor/trezor-firmware crypto sources, commit
+  76bfa7f15470409733c92e89d5cc0bb55c23463a.
+  https://github.com/trezor/trezor-firmware/tree/76bfa7f15470409733c92e89d5cc0bb55c23463a/crypto
+  Full upstream license and component notices: third_party/trezor_crypto/LICENSE.
+  Individual source headers also retain their copyright and license notices.
+  Selection/configuration is documented in third_party/README.md.
+
 Source package:
 https://files.waveshare.com/wiki/RP2350-Touch-LCD-2/RP2350-Touch-LCD-2.zip
 SHA-256: 5261bec2c85a723738fbffb7fcae1b1a88151fe97936e89852f56880fcda1946

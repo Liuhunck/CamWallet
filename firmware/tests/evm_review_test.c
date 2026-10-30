@@ -113,6 +113,12 @@ static void test_render(const char *prefix)
     for (unsigned i = 1; i <= 4; ++i) strcat(joined, rows[i]);
     assert(!strcmp(joined, "115792089237316195423570985008687907853269984665640564039457584007913129639935"));
     assert(!evm_review_render(frame, 12, &r, &s));
+    r.signing = true;
+    evm_review_lines(&r, 4, rows);
+    assert(!strcmp(rows[0], "SIGN THIS TRANSFER?"));
+    assert(!strcmp(rows[7], "CONFIRM WILL SIGN"));
+    evm_review_lines(&r, 1, rows);
+    assert(!strcmp(rows[5], "FROM (DEVICE KEY):"));
     /* No decision, no receipt; invalid requests cannot be acknowledged. */
     uint8_t out[57]; memset(out, 0xa5, sizeof(out));
     const uint8_t bad[] = {0xa0};

@@ -1,6 +1,6 @@
 # 电脑端 Python 二维码联调工具
 
-`qr_echo.py` 测试普通二维码，`ur_echo.py` 测试动态 UR，后者加 `--evm` 可发送固定参数的 EIP-1559 原生币触摸审核测试请求。两者都先显示请求码，再隐藏请求码并用电脑摄像头读取板端回传，完整数据比较后显示 **PASS / FAIL**。这是传输与审核联调工具，没有密钥、签名、RPC 或广播。
+`qr_echo.py` 测试普通二维码，`ur_echo.py` 测试动态 UR，后者加 `--evm` 可发送固定参数的 EIP-1559 原生币触摸审核测试请求。两者都先显示请求码，再隐藏请求码并用电脑摄像头读取板端回传，完整数据比较后显示 **PASS / FAIL**。这两个工具仍是传输与审核测试。新增 `evm_wallet.py` 负责 Sepolia 参数查询、读取板端签名、独立验签和用户主动广播；私钥只在板端。
 
 所有依赖安装在 **`companion/.venv`**，不会安装到全局 Python。依赖已锁定在 `requirements.txt`，版本范围记录在 `requirements.in`。本机的 Python 3.12 虚拟环境和依赖已经准备好。
 
@@ -22,7 +22,7 @@ python -m venv companion/.venv
 .\companion\.venv\Scripts\python.exe -m pip install -r companion/requirements.txt
 ```
 
-`.venv/` 已被仓库的 `.gitignore` 忽略。程序运行时不访问网络、不读取 USB 串口，也不会自动烧录板子。
+`.venv/` 已被仓库的 `.gitignore` 忽略。`qr_echo.py`、`ur_echo.py` 和 `evm_wallet.py sign` 不访问网络。`evm_wallet.py prepare/broadcast/receipt` 使用用户配置的 RPC。工具不读取 USB 串口，也不自动烧录。
 
 ## 2. 完成一轮实物验收
 
@@ -87,13 +87,13 @@ Windows 默认后端无法打开摄像头或黑屏时，可尝试 DirectShow 或
 .\companion\.venv\Scripts\python.exe -X utf8 .\companion\qr_echo.py --self-test
 ```
 
-原有 18 项测试包括真实二维码图像编码/解码、二进制、中文、128 字节边界、旋转、错误/多码/历史响应、超时、读取前隐藏请求码，以及摄像头资源释放。加上 UR/EVM 跨语言互通、确认/拒绝回执和窗口轮询回归，共 48 项通过；摄像头测试使用模拟设备，新增审核回执的光学流程仍待验收。
+原有 18 项测试包括真实二维码图像编码/解码、二进制、中文、128 字节边界、旋转、错误/多码/历史响应、超时、读取前隐藏请求码，以及摄像头资源释放。加上 UR/EVM 跨语言互通、确认/拒绝回执和窗口轮询回归，加上 Sepolia 签名与广播校验后共 60 项通过；摄像头测试使用模拟设备，新增审核回执的光学流程仍待验收。
 
 退出窗口时，PASS 返回退出码 `0`；FAIL、TIMEOUT 和摄像头读取错误返回 `1`；未完成或取消返回 `130`；缺少依赖、参数错误或窗口初始化失败返回 `2`。
 
 ## 6. 动态 UR 与 EVM 触摸审核测试
 
-先按 [firmware/README.md 第 6a 节](../firmware/README.md#6a-cur-动态二维码与-evm-触摸审核) 编译并烧录 cUR 版固件，然后运行：
+先按 [firmware/README.md 第 6a 节](../firmware/README.md#6a-cur-动态二维码与-evm-触摸审核) 编译并烧录固件，开机选择 TEST ONLY，然后运行：
 
 ```powershell
 # 默认256字节随机数据，11个基础分片，400ms一帧
@@ -107,7 +107,7 @@ Windows 默认后端无法打开摄像头或黑屏时，可尝试 DirectShow 或
 
 可选参数：`--camera 1`、`--backend dshow`、`--interval 600`（电脑发码间隔）、`--timeout 60`（电脑读回期限）、`--bytes 765`（普通 UR 数据上限）。板端从首个有效片起只有 30 秒收集时间，大包发码太慢会超时；换请求前等待板端重置或按 RESET。
 
-电脑端使用固定版本的 Foundation Python UR 参考实现，板端使用 cUR，源码与许可均已随项目提供，**没有新增 pip 依赖**。仅需要本文件原有的 `.venv` 和 `requirements.txt`。
+电脑端使用固定版本的 Foundation Python UR 参考实现，板端使用 cUR，源码与许可均已随项目提供，UR 传输库本身无需额外 pip 包；新增签名工具和完整软件测试需先按第 7 节同步 `.venv` 的锁定依赖。
 
 完整软件验证顺序：
 
@@ -122,6 +122,23 @@ C 测试需要主机 GCC/Clang，不使用 Arm GCC。Python 的独立互通测�
 
 EVM 模式默认发送 chain ID 11155111、nonce 0、地址 `0x1111111111111111111111111111111111111111`、金额 `10^15 wei`、gas 21000、max fee 2 gwei、priority fee 1 gwei。回传为 `ur:bytes` 包装的 57 字节审核回执，包含版本、确认/拒绝、请求 UUID 和完整请求 CBOR 的 SHA-256，**不是 `eth-signature`**。摘要用于绑定请求，没有设备身份认证，不表示签名或广播成功。协议和两种结果的完整验收步骤见 firmware 第 6a 节。
 
+## 7. Sepolia 签名与广播
+
+完整步骤、预期日志和限制见 [firmware 第 6b 节](../firmware/README.md#6b-创建账户并在-sepolia-签名)。板端开机选 CREATE 创建账户，记录屏幕二维码或串口中的公开地址，准备少量 Sepolia ETH，并在整个测试期间保持供电。RESET 会丢失账户，本轮没有恢复。
+
+```powershell
+uv pip sync companion/requirements.txt --python companion/.venv/Scripts/python.exe
+$env:CAMWALLET_RPC_URL = 'https://你的Sepolia-RPC地址'
+$sender = '0x板端生成的完整地址'
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py prepare --sender $sender --to $sender --amount-eth 0.000001 --out companion/local/request1.json
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py sign companion/local/request1.json --out companion/local/signed1.json
+# 只有下面这一步主动广播；先完成板端 CONFIRM 和电脑验签。
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py broadcast companion/local/signed1.json
+.\companion\.venv\Scripts\python.exe -X utf8 .\companion\evm_wallet.py receipt 0x完整交易哈希
+```
+
+签名窗口读到 SIGNED 回传后才保存交易；拒绝、旧回执、错误签名不保存。输出文件不覆盖，下一轮使用 request2/signed2 等新路径。文件只含公开交易数据，位于 Git 忽略的 `companion/local/`。主网、ERC-20、合约收款地址暂不支持。广播超时时先查打印的交易哈希，不自动重发。
+
 ## 后续钱包功能
 
-电脑端后续负责公开地址导入、RPC 查询、真实 EIP-1559 未签名交易准备、签名恢复验证与用户主动广播。助记词和私钥由板端处理。先完成触摸审核和确认/拒绝的实物验收，再增加 ERC-20 转账审核和签名。
+先完成第 7 节的实物和上链验收，再加入 ERC-20 转账审核、更方便的地址导入和交互。账户恢复本轮不做。

@@ -16,6 +16,10 @@ class URWindow(EchoWindow):
         super().__init__(root, args)
         root.title("CamWallet 动态UR / EVM触摸审核测试")
 
+    def make_session(self):
+        ur_type, payload, expected = new_ur_request(self.args.evm, self.args.bytes)
+        return ur_type, payload, URSession(expected, self.args.timeout, review=self.args.evm)
+
     def new_round(self):
         if self.worker is not None and self.worker.is_alive():
             return
@@ -23,9 +27,9 @@ class URWindow(EchoWindow):
             self.root.after_cancel(self.animation)
             self.animation = None
         self.worker = None
-        ur_type, payload, expected = new_ur_request(self.args.evm, self.args.bytes)
+        ur_type, payload, self.session = self.make_session()
+        expected = self.session.expected
         self.encoder = encoder(ur_type, payload)
-        self.session = URSession(expected, self.args.timeout, review=self.args.evm)
         self.last_frame = None
         self.actual_text.set("尚未收集回传码")
         identity = f"；UUID={expected[:16].hex()}" if self.args.evm else ""

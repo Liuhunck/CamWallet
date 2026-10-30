@@ -89,16 +89,16 @@ void evm_review_lines(const evm_request_t *r, unsigned page,
         snprintf(text, sizeof(text), "%" PRIu64, r->nonce); split(rows, 7, text);
         split(rows, 9, "TYPE 2 / EIP-1559");
         split(rows, 10, "NO DATA / NO ACCESS");
-        split(rows, 11, "REVIEW ONLY / NO SIGN");
+        split(rows, 11, r->signing ? "SEPOLIA SIGNING" : "REVIEW ONLY / NO SIGN");
         break;
     case 1:
         split(rows, 0, "RECIPIENT (FULL):");
         strcpy(text, "0x"); evm_hex(r->to, 20, text + 2); split(rows, 1, text);
         if (r->has_address) {
-            split(rows, 5, "FROM (UNVERIFIED):");
+            split(rows, 5, r->signing ? "FROM (DEVICE KEY):" : "FROM (UNVERIFIED):");
             strcpy(text, "0x"); evm_hex(r->address, 20, text + 2); split(rows, 6, text);
         } else split(rows, 5, "FROM: NOT PROVIDED");
-        split(rows, 10, "NO KEY LOADED");
+        split(rows, 10, r->signing ? "DEVICE KEY VERIFIED" : "NO KEY LOADED");
         break;
     case 2:
         split(rows, 0, eth ? "AMOUNT (WEI):" : "AMOUNT (BASE UNITS):");
@@ -134,12 +134,12 @@ void evm_review_lines(const evm_request_t *r, unsigned page,
         split(rows, 11, "CAP, NOT ACTUAL FEE");
         break;
     case 4:
-        split(rows, 0, "CONFIRM THIS REVIEW?");
+        split(rows, 0, r->signing ? "SIGN THIS TRANSFER?" : "CONFIRM THIS REVIEW?");
         split(rows, 2, "REQUEST ID:");
         evm_hex(r->request_id, 16, text); split(rows, 3, text);
         split(rows, 6, "CONFIRM / REJECT");
-        split(rows, 7, "RETURNS A RECEIPT");
-        split(rows, 9, "NO SIGNATURE");
+        split(rows, 7, r->signing ? "CONFIRM WILL SIGN" : "RETURNS A RECEIPT");
+        split(rows, 9, r->signing ? "SEPOLIA ONLY" : "NO SIGNATURE");
         split(rows, 10, "NO BROADCAST");
         if (!eth) split(rows, 11, "UNKNOWN NETWORK");
         break;

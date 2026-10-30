@@ -47,7 +47,7 @@ size_t cw_cbor_wrap_bytes(const uint8_t *bytes, size_t size, uint8_t *out, size_
     return size + header;
 }
 
-static bool path(cursor_t *c)
+static bool path(cursor_t *c, evm_request_t *out)
 {
     uint64_t n, tag;
     if (!head(c, 6, &tag) || tag != 304 || !head(c, 5, &n) || n < 1 || n > 3) return false;
@@ -65,6 +65,7 @@ static bool path(cursor_t *c)
             }
         } else {
             if (!head(c, 0, &value) || (key == 2 ? value > UINT32_MAX : value != 5)) return false;
+            if (key == 2) { out->has_fingerprint = true; out->fingerprint = (uint32_t)value; }
         }
     }
     return (seen & 2u) != 0;
@@ -167,7 +168,7 @@ const char *evm_parse_request(const uint8_t *cbor, size_t size, evm_request_t *o
             if (!head(&c, 0, &out->chain_id) || !out->chain_id) return "EVM INVALID CHAIN";
             break;
         case 5:
-            if (!path(&c)) return "EVM PATH UNSUPPORTED";
+            if (!path(&c, out)) return "EVM PATH UNSUPPORTED";
             break;
         case 6:
             if (!span(&c, 2, &data, &length) || length != 20) return "EVM INVALID ADDRESS";
@@ -179,6 +180,8 @@ const char *evm_parse_request(const uint8_t *cbor, size_t size, evm_request_t *o
         }
     }
     if (c.left || (seen & 0x2eu) != 0x2eu) return "EVM MISSING FIELDS";
+    out->sign_data = sign_data;
+    out->sign_size = sign_size;
     return transaction(sign_data, sign_size, out);
 }
 void evm_uint256_decimal(const uint8_t number[32], char out[79])

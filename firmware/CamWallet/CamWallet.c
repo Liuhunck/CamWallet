@@ -2,6 +2,7 @@
 #include <inttypes.h>
 #include <string.h>
 #include "pico/stdlib.h"
+#include "pico/rand.h"
 
 #include "drivers/camera.h"
 #include "drivers/lcd.h"
@@ -12,6 +13,8 @@
 #include "cur_memory.h"
 #include "evm_request.h"
 #include "ui/evm_review.h"
+#include "wallet.h"
+#include "memzero.h"
 
 #define QR_ECHO_HOLD_SECONDS 30u
 #define UR_ECHO_HOLD_SECONDS 60u
@@ -33,6 +36,66 @@ static uint64_t next_result_report;
 static cw_ur_message_t ur_message;
 static evm_request_t evm_request;
 static bool touch_ready;
+static bool signing_account;
+
+/* Same release/debounce gate as transaction review. No active camera DMA. */
+static int account_button(void)
+{
+    evm_review_t gate; evm_review_init(&gate);
+    unsigned failures = 0;
+    uint8_t fingers = 0; uint16_t x = 0, y = 0;
+    while (true) {
+        bool valid = touch_read(&fingers, &x, &y);
+        if (valid) failures = 0;
+        else if (++failures >= 10) return -1;
+        if (evm_review_touch(&gate, valid, fingers, x, y, time_us_64() / 1000u))
+            return gate.decision == EVM_REJECTED ? 0 : 1;
+        sleep_ms(20);
+    }
+}
+
+static void setup_test_account(void)
+{
+    if (!touch_ready) return;
+    lcd_clear(LCD_BLACK);
+    lcd_draw_text(10, 20, "SEPOLIA TEST WALLET", 1, LCD_WHITE, LCD_BLACK);
+    lcd_draw_text(10, 80, "CREATE NEW ACCOUNT", 1, LCD_WHITE, LCD_BLACK);
+    lcd_draw_text(10, 112, "RAM ONLY", 1, LCD_WHITE, LCD_BLACK);
+    lcd_draw_text(10, 144, "RESET LOSES ACCOUNT", 1, LCD_RED, LCD_BLACK);
+    lcd_draw_text(10, 200, "TEST ONLY: NO KEY", 1, LCD_WHITE, LCD_BLACK);
+    lcd_fill_rect(4, 270, 108, 46, 0x39e7);
+    lcd_draw_text(8, 285, "TEST ONLY", 1, LCD_WHITE, 0x39e7);
+    lcd_fill_rect(128, 270, 108, 46, 0x0320);
+    lcd_draw_text(149, 285, "CREATE", 1, LCD_WHITE, 0x0320);
+    if (account_button() != 1) return;
+    lcd_clear(LCD_BLACK);
+    lcd_draw_text(10, 100, "CREATING ACCOUNT...", 1, LCD_WHITE, LCD_BLACK);
+    uint8_t seed[64], blind[32], account[20];
+    /* SDK 2.3.1 mixes RP2350 TRNG into its PRNG. This prototype is restricted
+     * to Sepolia; entropy qualification and persistent key storage are future work. */
+    for (unsigned i = 0; i < sizeof(seed); i += 8) {
+        uint64_t random = get_rand_64(); memcpy(seed + i, &random, 8);
+    }
+    for (unsigned i = 0; i < sizeof(blind); i += 8) {
+        uint64_t random = get_rand_64(); memcpy(blind + i, &random, 8);
+    }
+    signing_account = wallet_create(seed, sizeof(seed), blind);
+    memzero(seed, sizeof(seed)); memzero(blind, sizeof(blind));
+    if (!signing_account || !wallet_address(account)) {
+        lcd_draw_text(10, 150, "CREATE FAILED", 1, LCD_RED, LCD_BLACK);
+        printf("[Wallet] create failed; signing disabled\n"); sleep_ms(3000); return;
+    }
+    char text[43] = "0x"; evm_hex(account, sizeof(account), text + 2);
+    qr_payload_t address_payload = {.length = 42};
+    memcpy(address_payload.bytes, text, 42);
+    printf("[Wallet] SEPOLIA address=%s path=m/44'/60'/0'/0/0; RAM ONLY, reset loses key\n", text);
+    if (qr_encode_payload(&address_payload, &response_symbol)
+        && qr_render_rgb565_be(&response_symbol, camera_frames[0], CAMERA_FRAME_BYTES, LCD_WIDTH, LCD_HEIGHT)) {
+        scan_preview_compose(camera_frames[0], CAMERA_FRAME_BYTES, "SEPOLIA ADDRESS", "TAP BOTTOM TO SCAN");
+        lcd_display_rgb565_be(camera_frames[0], CAMERA_FRAME_BYTES);
+        if (account_button() < 0) { wallet_clear(); signing_account = false; }
+    } else { wallet_clear(); signing_account = false; }
+}
 
 static void show_camera_error(const char *reason)
 {
@@ -155,6 +218,11 @@ static const char *prepare_ur_response(bool *evm)
     if (strcmp(ur_message.type, "eth-sign-request") != 0) return "UR TYPE UNSUPPORTED";
     const char *error = evm_parse_request(ur_message.cbor, ur_message.length, &evm_request);
     if (error) return error;
+    if (signing_account) {
+        error = wallet_check(&evm_request);
+        if (error) return error;
+        evm_request.signing = true;
+    }
     /* Preserve the exact request until the user's decision binds its digest. */
     *evm = true;
     return NULL;
@@ -167,12 +235,12 @@ static evm_decision_t show_evm_review(uint8_t *frame)
     evm_hex(evm_request.to, 20, address);
     evm_uint256_decimal(evm_request.value, value);
     evm_uint256_decimal(evm_request.max_total_fee, fee);
-    printf("[EVM] REVIEW / NOT SIGNED request_id=%s chain_id=%" PRIu64 " nonce=%" PRIu64 "\n",
-           uuid, evm_request.chain_id, evm_request.nonce);
+    printf("[EVM] %s request_id=%s chain_id=%" PRIu64 " nonce=%" PRIu64 "\n",
+           evm_request.signing ? "REVIEW TO SIGN" : "REVIEW ONLY", uuid, evm_request.chain_id, evm_request.nonce);
     printf("[EVM] to=0x%s value_wei=%s gas_limit=%" PRIu32 "\n", address, value, evm_request.gas_limit);
     printf("[EVM] max_fee_per_gas=%" PRIu64 " priority_fee_per_gas=%" PRIu64 " max_total_fee_wei=%s\n",
            evm_request.max_fee_per_gas, evm_request.priority_fee_per_gas, fee);
-    printf("[EVM] path=m/44'/60'/0'/0/0; sender address is unverified; no key loaded\n");
+    printf("[EVM] path=m/44'/60'/0'/0/0; sender=%s\n", evm_request.signing ? "VERIFIED" : "UNVERIFIED / NO KEY");
     if (!touch_ready) goto touch_error;
     evm_review_t review;
     evm_review_init(&review);
@@ -198,7 +266,7 @@ static evm_decision_t show_evm_review(uint8_t *frame)
         }
         sleep_ms(20);
     }
-    printf("[EVM] decision=%s request_id=%s; NOT SIGNED\n",
+    printf("[EVM] decision=%s request_id=%s; signature not generated yet\n",
            review.decision == EVM_CONFIRMED ? "CONFIRMED" : "REJECTED", uuid);
     return review.decision;
 touch_error:
@@ -214,21 +282,25 @@ touch_error:
 static void show_ur_echo(uint8_t *frame, bool evm)
 {
     evm_decision_t decision = EVM_PENDING;
+    bool signed_response = false;
     if (evm) {
         decision = show_evm_review(frame);
         if (decision == EVM_PENDING) return;
-        size_t size = evm_decision_response(ur_message.cbor, ur_message.length, decision,
-                                           ur_message.cbor, sizeof(ur_message.cbor));
+        signed_response = evm_request.signing && decision == EVM_CONFIRMED;
+        size_t size = signed_response ? wallet_sign(ur_message.cbor, ur_message.length, true,
+            ur_message.cbor, sizeof(ur_message.cbor)) : evm_decision_response(
+            ur_message.cbor, ur_message.length, decision, ur_message.cbor, sizeof(ur_message.cbor));
         if (!size) { printf("[EVM] receipt encoding failed\n"); return; }
         ur_message.length = size;
-        strcpy(ur_message.type, "bytes");
+        strcpy(ur_message.type, signed_response ? "eth-signature" : "bytes");
     }
     if (!cw_ur_tx_begin(ur_message.type, ur_message.cbor, ur_message.length)) {
         printf("[UR] response allocation failed\n");
         return;
     }
-    printf("[UR] echo ready: type=%s cbor=%u parts=%u interval=%ums hold=%us; NOT A SIGNATURE\n",
-           ur_message.type, (unsigned)ur_message.length, cw_ur_tx_count(), UR_FRAME_MS, UR_ECHO_HOLD_SECONDS);
+    printf("[UR] response ready: type=%s cbor=%u parts=%u interval=%ums hold=%us; %s\n",
+           ur_message.type, (unsigned)ur_message.length, cw_ur_tx_count(), UR_FRAME_MS, UR_ECHO_HOLD_SECONDS,
+           signed_response ? "SIGNED / NOT BROADCAST" : "NOT A SIGNATURE");
     const uint64_t end = time_us_64() + UR_ECHO_HOLD_SECONDS * 1000000ull;
     unsigned number = 0;
     while (time_us_64() < end) {
@@ -242,7 +314,7 @@ static void show_ur_echo(uint8_t *frame, bool evm)
         ++number;
         snprintf(label, sizeof(label), "FRAME %u %us", number,
                  (unsigned)((end - start + 999999u) / 1000000u));
-        scan_preview_compose(frame, CAMERA_FRAME_BYTES, evm ?
+        scan_preview_compose(frame, CAMERA_FRAME_BYTES, signed_response ? "SIGNED / SEPOLIA" : evm ?
             (decision == EVM_CONFIRMED ? "CONFIRMED / NO SIGN" : "REJECTED / NO SIGN") : "UR ECHO / TEST", label);
         lcd_display_rgb565_be(frame, CAMERA_FRAME_BYTES);
         if (number % 12u == 1u) printf("[UR] echo frame=%u arena_peak=%u/%u\n", number,
@@ -257,8 +329,9 @@ int main(void)
 {
     stdio_init_all();
     lcd_init();
-    printf("[CamWallet] TOUCH + EVM REVIEW V1 (NO SIGNING)\n");
+    printf("[CamWallet] SEPOLIA SIGNER V1 / RAM ACCOUNT\n");
     touch_ready = touch_init();
+    setup_test_account();
     printf("[UR] cUR ready: part=%u message=%u fragments=%u arena=%u timeout=%ums\n",
            CW_UR_PART_MAX, CW_UR_MESSAGE_MAX, CW_UR_SEQUENCE_MAX, CW_UR_ARENA_BYTES, CW_UR_TIMEOUT_MS);
     printf("[LCD] preview: composed status bars, one frame transfer\n");

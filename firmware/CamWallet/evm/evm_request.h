@@ -11,6 +11,12 @@ typedef struct {
     uint8_t max_total_fee[32];
     uint8_t address[20];
     bool has_address;
+    bool has_fingerprint;
+    uint32_t fingerprint;
+    /* Borrowed from the immutable input CBOR; valid until that buffer changes. */
+    const uint8_t *sign_data;
+    size_t sign_size;
+    bool signing; /* Set only by the application after wallet validation. */
     uint64_t chain_id, nonce, max_fee_per_gas, priority_fee_per_gas;
     uint32_t gas_limit;
 } evm_request_t;

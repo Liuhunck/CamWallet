@@ -3,6 +3,30 @@
 The QR dependencies are vendored, so building CamWallet does not download them.
 Their source files are unmodified. Integration and configuration live in `../qr/`.
 
+## Signing primitives
+
+- `secp256k1/`: bitcoin-core/libsecp256k1 **v0.8.0**, commit
+  `6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d`.
+  Source: https://github.com/bitcoin-core/secp256k1/tree/6e2c8bc4ecdc6e71dbe7a368f360d8d453ce435d
+  Includes upstream public API headers, internal headers, `secp256k1.c`, the
+  two precomputed table sources and recovery module. MIT license in `COPYING`.
+  Source content is unchanged; `../crypto/CMakeLists.txt` compiles the portable
+  32-bit path (`USE_FORCE_WIDEMUL_INT64`), recovery, 22 KiB signing table, and
+  verification window 4. No experimental ARM assembly or extra signing schemes.
+  The wrapper uses a checked 1 KiB preallocated context and never calls the
+  heap-allocating context API. Host tests use the same arithmetic configuration.
+- `trezor_crypto/`: selected files from trezor/trezor-firmware `crypto/`, commit
+  `76bfa7f15470409733c92e89d5cc0bb55c23463a`.
+  Source: https://github.com/trezor/trezor-firmware/tree/76bfa7f15470409733c92e89d5cc0bb55c23463a/crypto
+  Unmodified SHA2, SHA3/Keccak, HMAC, RIPEMD160, memzero and their headers/config;
+  upstream `LICENSE` preserves component notices. No BIP39 or restore code is
+  included. CamWallet's BIP32 fixed-path wrapper uses these HMAC/hash primitives
+  and libsecp256k1's public-key/tweak API, checked against Python HD derivation.
+- The RAM-only test account obtains seed/blinding material from Pico SDK 2.3.1
+  `pico_rand` on RP2350. Hardware entropy qualification, side-channel evaluation,
+  persistent keys and recovery are not implemented. Firmware signatures are
+  restricted to Sepolia (11155111), with explicit manual approval.
+
 ## cUR transport
 
 - Upstream: https://github.com/odudex/cUR
